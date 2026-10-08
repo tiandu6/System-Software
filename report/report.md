@@ -183,14 +183,6 @@ int another_function(int arg);
 
 ---
 
-### Challenge：[Challenge标题]
-
-**负责人：** [学号-姓名]
-
-[按照Challenge的具体要求进行解答]
-
----
-
 ## 五、测试与验证
 
 <!-- 根据该实验的具体情况，提供完整的测试运行截图，应包含：
