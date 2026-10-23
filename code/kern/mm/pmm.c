@@ -34,7 +34,8 @@ static void check_alloc_page(void);
 
 // init_pmm_manager - initialize a pmm_manager instance
 static void init_pmm_manager(void) {
-    pmm_manager = &default_pmm_manager;
+    // lab2 function2-2 2511107
+    pmm_manager = &best_fit_pmm_manager;
     cprintf("memory management: %s\n", pmm_manager->name);
     pmm_manager->init();
 }
@@ -61,7 +62,57 @@ size_t nr_free_pages(void) {
     return pmm_manager->nr_free_pages();
 }
 
-//lab2 function1 YOUR CODE
+//lab2 function1 2511107
+static void page_init(void) {
+    extern char end[];
+    uint64_t memory_base = get_memory_base();
+    uint64_t memory_size = get_memory_size();
+
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+    if (memory_base == 0 || memory_size == 0 ||
+        memory_base + memory_size < memory_base) {
+        panic("invalid physical memory range in device tree");
+    }
+    uint64_t memory_end = memory_base + memory_size;
+    uintptr_t managed_end = ROUNDDOWN(
+        memory_end < PHYSICAL_MEMORY_END ? memory_end : PHYSICAL_MEMORY_END,
+        PGSIZE);
+    if (memory_base > KERNEL_BEGIN_PADDR || managed_end <= DRAM_BASE ||
+        PADDR(end) > managed_end) {
+        panic("physical memory does not contain the kernel");
+    }
+
+    npage = managed_end / PGSIZE;
+    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+    uintptr_t pages_pa = PADDR(pages);
+    size_t descriptor_count = npage - nbase;
+    if (pages_pa < memory_base || pages_pa > managed_end ||
+        descriptor_count > (managed_end - pages_pa) / sizeof(struct Page)) {
+        panic("not enough physical memory for Page descriptors");
+    }
+
+    // All pages start reserved, including firmware, the kernel and descriptors.
+    for (size_t i = 0; i < descriptor_count; i++) {
+        struct Page *page = &pages[i];
+        page->flags = 0;
+        page->property = 0;
+        set_page_ref(page, 0);
+        SetPageReserved(page);
+        list_init(&page->page_link);
+    }
+
+    uintptr_t free_begin = ROUNDUP(
+        pages_pa + descriptor_count * sizeof(struct Page), PGSIZE);
+    cprintf("physical memory: [0x%016lx, 0x%016lx)\n",
+            memory_base, memory_end);
+    cprintf("managed memory ends at: 0x%016lx\n", managed_end);
+    cprintf("Page descriptors: [0x%016lx, 0x%016lx)\n",
+            pages_pa, pages_pa + descriptor_count * sizeof(struct Page));
+    if (free_begin < managed_end) {
+        init_memmap(pa2page(free_begin), (managed_end - free_begin) / PGSIZE);
+    }
+    cprintf("free physical pages: %lu\n", nr_free_pages());
+}
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
