@@ -63,36 +63,58 @@ size_t nr_free_pages(void) {
     return pmm_manager->nr_free_pages();
 }
 
-//lab2 function1 2511107
+//lab2 function1 2513411
 static void page_init(void) {
     extern char end[];
+
     uint64_t memory_base = get_memory_base();
     uint64_t memory_size = get_memory_size();
+    uint64_t memory_end;
+    uintptr_t managed_end;
+    uintptr_t kernel_end_pa;
+    uintptr_t pages_pa;
+    uintptr_t pages_end_pa;
+    uintptr_t free_begin;
+    size_t descriptor_count;
+    size_t free_count;
 
     va_pa_offset = PHYSICAL_MEMORY_OFFSET;
     if (memory_base == 0 || memory_size == 0 ||
-        memory_base + memory_size < memory_base) {
+        memory_base > (uint64_t)-1 - memory_size) {
         panic("invalid physical memory range in device tree");
     }
-    uint64_t memory_end = memory_base + memory_size;
-    uintptr_t managed_end = ROUNDDOWN(
-        memory_end < PHYSICAL_MEMORY_END ? memory_end : PHYSICAL_MEMORY_END,
-        PGSIZE);
-    if (memory_base > KERNEL_BEGIN_PADDR || managed_end <= DRAM_BASE ||
-        PADDR(end) > managed_end) {
+    memory_end = memory_base + memory_size;
+
+    /* npage describes the range reported by the firmware, in page numbers. */
+    npage = PPN(memory_end);
+    if (npage <= nbase || memory_end <= DRAM_BASE ||
+        memory_base > KERNEL_BEGIN_PADDR) {
         panic("physical memory does not contain the kernel");
     }
 
-    npage = managed_end / PGSIZE;
+    /* This lab only maps the DRAM interval bounded by PHYSICAL_MEMORY_END. */
+    managed_end = (memory_end < PHYSICAL_MEMORY_END) ? memory_end
+                                                       : PHYSICAL_MEMORY_END;
+    managed_end = ROUNDDOWN(managed_end, PGSIZE);
+    kernel_end_pa = PADDR((uintptr_t)end);
+    if (managed_end <= DRAM_BASE || kernel_end_pa >= managed_end) {
+        panic("physical memory does not contain the kernel");
+    }
+
+    /* The descriptor array starts after the kernel and is page aligned. */
     pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
-    uintptr_t pages_pa = PADDR(pages);
-    size_t descriptor_count = npage - nbase;
-    if (pages_pa < memory_base || pages_pa > managed_end ||
-        descriptor_count > (managed_end - pages_pa) / sizeof(struct Page)) {
+    pages_pa = PADDR((uintptr_t)pages);
+    descriptor_count = npage - nbase;
+    if (pages_pa < memory_base || pages_pa >= managed_end ||
+        descriptor_count > ((uintptr_t)-1 - pages_pa) / sizeof(struct Page)) {
+        panic("not enough physical memory for Page descriptors");
+    }
+    pages_end_pa = pages_pa + descriptor_count * sizeof(struct Page);
+    if (pages_end_pa > managed_end) {
         panic("not enough physical memory for Page descriptors");
     }
 
-    // All pages start reserved, including firmware, the kernel and descriptors.
+    /* Start conservatively: firmware, the kernel, and descriptors are reserved. */
     for (size_t i = 0; i < descriptor_count; i++) {
         struct Page *page = &pages[i];
         page->flags = 0;
@@ -102,16 +124,22 @@ static void page_init(void) {
         list_init(&page->page_link);
     }
 
-    uintptr_t free_begin = ROUNDUP(
-        pages_pa + descriptor_count * sizeof(struct Page), PGSIZE);
+    /* Only complete pages after the descriptor array enter the allocator. */
+    free_begin = ROUNDUP(pages_end_pa, PGSIZE);
+    if (free_begin > managed_end) {
+        panic("no complete physical page remains after reservations");
+    }
+    free_count = (managed_end - free_begin) / PGSIZE;
+    if (free_count == 0) {
+        panic("no complete physical page remains after reservations");
+    }
+
     cprintf("physical memory: [0x%016lx, 0x%016lx)\n",
             memory_base, memory_end);
     cprintf("managed memory ends at: 0x%016lx\n", managed_end);
     cprintf("Page descriptors: [0x%016lx, 0x%016lx)\n",
-            pages_pa, pages_pa + descriptor_count * sizeof(struct Page));
-    if (free_begin < managed_end) {
-        init_memmap(pa2page(free_begin), (managed_end - free_begin) / PGSIZE);
-    }
+            pages_pa, pages_end_pa);
+    init_memmap(pa2page(free_begin), free_count);
     cprintf("free physical pages: %lu\n", nr_free_pages());
 }
 

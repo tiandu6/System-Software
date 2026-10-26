@@ -1,5 +1,185 @@
 # Lab2 提示词汇总
 
+## 功能模块一任务一：物理内存探测与页描述符初始化
+
+负责人：2513411-邱宇湛。
+
+[PROMPT]
+
+**任务**：在当前 uCore Lab2 工程中，完成 `code/kern/mm/pmm.c` 中标记为 `lab2 function1 YOUR CODE` 的物理内存探测与页描述符初始化功能，实现完整的 `static void page_init(void)`，并保持 `pmm_init()` 对它的调用顺序不变。实现必须依据工程中的真实头文件、DTB 解析代码、链接脚本和测试代码，不要凭空改写接口或生成与工程无关的示例代码。
+
+**操作要求**：必须修改实际工程文件，而不是只输出建议代码。在完成位置保留 `lab2 function1`，将 `YOUR CODE` 替换为 `2513411`。可以添加函数前置声明、局部变量和 `static` 辅助函数，但不得修改 `struct Page`、`struct pmm_manager`、DTB 接口、分配器接口、已有测试或 `pmm_init()` 的调用顺序。不要修改 First-Fit、Best-Fit、Buddy、SLUB 或评分脚本，不要删除原有诊断输出，不提交或推送 Git。
+
+**输出要求**：说明实际修改了哪些文件、每个地址和计数的单位、保留区如何排除、空闲区如何交给 `pmm_manager`，并列出实际运行的编译、QEMU 和评分命令。若由于工程中尚未完成的其他任务导致集成测试无法执行，必须明确写出阻塞原因，不得伪造运行日志或把预期输出写成实际结果。
+
+[RELY]
+
+**工程及参考文件**：
+
+- `code/kern/mm/pmm.c`：全局状态、`pmm_init()`、`init_memmap()`、`PADDR()` 和待完成的 `page_init()`。
+- `code/kern/driver/dtb.c`、`dtb.h`：`dtb_init()` 已解析设备树，`get_memory_base()` 和 `get_memory_size()` 返回物理内存范围。
+- `code/kern/mm/pmm.h`：`pages`、`npage`、`nbase`、`va_pa_offset`，以及 `pa2page()`、`page2pa()` 和 `PADDR()`。
+- `code/kern/mm/memlayout.h`：`KERNBASE`、`PHYSICAL_MEMORY_OFFSET`、`PHYSICAL_MEMORY_END`、`struct Page` 和页面标志宏。
+- `code/kern/mm/mmu.h`：`PGSIZE = 4096`、`PGSHIFT = 12` 和 `PPN()`。
+- `code/libs/defs.h`：`ROUNDUP()`、`ROUNDDOWN()` 等地址对齐宏。
+- `code/kern/init/entry.S`、`tools/kernel.ld`：启动页表、内核虚拟地址和链接符号 `end` 的来源。
+- `code/tools/test_lab2.c`：对 `va_pa_offset`、`npage`、`pages` 对齐、保留页和地址转换的验收条件。
+
+相关全局状态和接口的语义如下：
+
+```c
+struct Page *pages;       // Page 描述符数组的虚拟地址
+size_t npage;             // 物理内存末端对应的页号，不是字节数
+const size_t nbase;       // DRAM_BASE / PGSIZE，pages[0] 对应的物理页号
+uint64_t va_pa_offset;    // 内核虚拟地址与物理地址的固定偏移
+
+uint64_t get_memory_base(void);
+uint64_t get_memory_size(void);
+static void init_memmap(struct Page *base, size_t n);
+static struct Page *pa2page(uintptr_t pa);
+```
+
+**地址和单位约定**：
+
+- `get_memory_base()`、`get_memory_size()`、`end` 转换后的值是字节地址；`npage`、`nbase` 和 `init_memmap()` 的 `n` 是页面数量。
+- 每页大小为 `PGSIZE`，页号使用 `PPN(address)` 计算；不要把 `Page * + n` 当成地址加 n 字节。
+- `pages` 是内核虚拟地址，只有在需要与物理内存边界比较时才通过 `PADDR()` 转换为物理地址。
+- `PageReserved` 表示页面不能交给分配器；只有真正可用的连续页面才能通过 `init_memmap()` 注册给当前 `pmm_manager`。
+
+[GUARANTEE]
+
+必须实现：
+
+```c
+static void page_init(void);
+```
+
+成功返回后必须满足：
+
+1. `va_pa_offset` 等于 `PHYSICAL_MEMORY_OFFSET`；在当前 QEMU 布局中也应与 `KERNBASE - get_memory_base()` 一致。
+2. 设备树给出的物理内存范围有效，`npage` 表示物理内存末端的页号，并且有效页数大于 `nbase`。
+3. `pages` 按 `PGSIZE` 对齐，并位于内核链接符号 `end` 之后；数组覆盖 `[nbase, npage)` 的所有页描述符。
+4. 内核镜像、内核末尾未对齐占用的页面以及 `pages` 数组本身不能进入空闲区；对于 OpenSBI、页表和设备树等启动阶段已占用的区域，必须遵循当前启动布局的保留范围，不能把已知保留页交给分配器。
+5. 所有可管理页面在登记前具有正确的保留状态；登记完成后，当前管理器的 `nr_free_pages()` 大于零且不超过可管理页总数。
+6. 空闲区起点和长度均按页对齐，只有存在至少一个完整页面时才调用 `init_memmap()`。
+7. 设备树地址为零、大小为零或范围溢出时，必须停止初始化并通过 `panic()` 等框架机制报告；当设备树范围超过 `PHYSICAL_MEMORY_END` 时，只能把管理末端限制在该工程上界，若限制后无法覆盖内核、描述符数组或没有可用完整页面，也必须停止初始化，不能把未知区域交给分配器。
+8. `page2pa()` 与 `pa2page()` 能对合法的 `Page` 描述符互相转换；实现不能清空物理页中的原有数据。
+
+[SPECIFICATION]
+
+## page_init
+
+**Pre-Condition**：
+
+- `dtb_init()` 已完成，`get_memory_base()` 和 `get_memory_size()` 能返回启动固件报告的范围；
+- `pmm_manager` 已完成初始化，`PGSIZE`、地址转换宏和链接符号 `end` 可用；
+- 当前执行环境为单核、串行的内核启动流程，尚未向分配器登记本次页面范围。
+
+**Post-Condition**：
+
+- `va_pa_offset`、`npage` 和 `pages` 分别保存正确的地址偏移、物理末端页号和按页对齐的描述符数组；
+- 描述符数组覆盖 `[nbase, npage)`，其对应的已占用页面保持保留状态；
+- 描述符数组末端之后、管理上界以内的完整页面才会通过 `init_memmap()` 交给当前 `pmm_manager`；
+- 所有地址比较使用统一的物理地址单位，页面数量使用页数而不是字节数，且不会清空物理页面内容。
+
+**Case 1**：
+
+- 当 DTB 范围为零、发生整数溢出、不能覆盖内核或描述符数组时，调用框架错误处理机制终止初始化，不调用 `init_memmap()` 登记未知范围。
+
+**Case 2**：
+
+- 当范围有效且存在完整空闲页时，完成描述符初始化，排除已占用前缀，并将连续空闲页面登记到当前分配器；登记后的空闲页统计应与实际页面数量一致。
+
+**Case 3**：
+
+- 当页面末端对齐或描述符数组占用导致剩余空间不足一整页时，终止初始化并报告错误，不能创建零长度空闲区。
+
+**Requirements**：
+
+- 内存范围超过 `PHYSICAL_MEMORY_END` 时使用工程允许的管理上界；
+- 不得把虚拟地址直接与 DTB 返回的物理地址比较；
+- 不得修改 `nbase` 的语义、`pmm_init()` 的调用顺序或其他分配器和测试代码。
+
+## page_init 的实现顺序
+
+1. 读取 `mem_begin = get_memory_base()` 和 `mem_size = get_memory_size()`，检查两者是否有效，并计算 `mem_end = mem_begin + mem_size`。
+2. 设置虚实地址偏移 `va_pa_offset`，验证内存范围没有越过当前工程的可管理上界。
+3. 根据 `mem_end` 计算 `npage`；不要把字节数直接写入页数变量。
+4. 将 `pages` 放置在内核符号 `end` 之后的下一个页边界，并确保整个 `pages` 数组位于有效映射范围内。
+5. 先把 `[nbase, npage)` 对应的 `Page` 描述符初始化为保留状态，避免未明确登记的页面被分配。
+6. 通过 `PADDR(pages + (npage - nbase))` 计算描述符数组末端的物理地址，向上对齐到页面边界，得到可分配物理内存的起点。
+7. 将内核末端、描述符数组末端和物理内存起点分别换算到同一物理地址单位后，确定真正的空闲范围；不要把虚拟地址和物理地址直接比较。
+8. 若剩余范围至少有一整页，调用 `init_memmap(pa2page(free_start), free_count)`；否则终止初始化。
+9. 输出探测到的物理内存范围和必要的诊断信息，保持 `pmm_init()` 后续的 `check_alloc_page()` 与 `satp` 输出有效。
+
+## 必须覆盖的边界条件
+
+- DTB 未初始化或返回零范围；
+- 物理内存大小不是页面整数倍；
+- `end` 位于页面中间；
+- `pages` 数组末端需要跨越多个页面；
+- 描述符数组末端刚好到达物理内存末端；
+- 没有可用完整页时不能调用 `init_memmap()`；
+- 保留区不能因为地址转换或对齐错误进入空闲链表；
+- 不得改变 `nbase` 的语义，也不能让 `pages[0]` 错位到错误的物理页号。
+
+## 验证要求
+
+完成后先检查源码和编译错误，再按实际环境运行：
+
+```bash
+make clean
+make -j2
+make qemu
+make grade
+```
+
+验收时重点核对 DTB 输出、`physical memory map`、空闲页数量、`check_alloc_page()` 和测试中的 `[Test 1] Page Init: PASS`。如果 Best-Fit 或其他模块尚未完成导致整体构建受阻，应单独记录该依赖，不能把模块一的设计正确性写成已经通过整套评分。
+
+## 报告交付要求
+
+报告中要说明：设备树如何提供范围、`va_pa_offset`/`npage`/`pages` 的含义、保留区和空闲区的划分、地址转换与页面对齐的关系、核心函数调用顺序、遇到的真实问题及解决方式，并区分已运行、失败和未运行的测试。
+
+## 功能模块一扩展任务：硬件的可用物理内存范围获取方法
+
+负责人：2513411-邱宇湛。
+
+[PROMPT]
+
+**任务**：回答 Lab 2 的思考题：如果操作系统无法在编译时提前知道当前硬件的可用物理内存范围，应如何让操作系统可靠地获取这段范围？请结合 RISC-V uCore 的实际启动上下文给出工程化回答，并区分“硬件报告的物理内存范围”和“操作系统最终可分配的空闲范围”。
+
+**操作要求**：只围绕当前工程的真实启动流程和平台接口进行分析，不修改工程代码，不把未经固件声明的地址直接当作 RAM，也不把理论上的探测结果伪装成已运行的测试结果。
+
+**输出要求**：使用下面的 `[RELY]`、`[GUARANTEE]` 和 `[SPECIFICATION]` 内容，按获取入口、解析校验、保留区处理和交给页分配器的顺序作答，并明确区分硬件报告范围与最终可分配范围。
+
+[RELY]
+
+- `kern/init/entry.S` 从启动参数 `a1` 保存 `boot_dtb`；
+- `kern/driver/dtb.c` 解析 DTB 头、结构块和 `/memory` 节点的 `reg` 属性；
+- `get_memory_base()` 与 `get_memory_size()` 提供当前工程使用的物理内存范围；
+- `kern/mm/pmm.c` 还必须排除 OpenSBI、内核、页表、设备树和 `Page` 描述符数组等保留区；
+- 不同平台可能由 RISC-V DTB、SBI/固件接口、UEFI memory map 或其他平台固件提供内存地图。
+
+[GUARANTEE]
+
+回答必须说明：
+
+1. 首选使用启动固件提供的内存地图，而不是盲目扫描或写入物理地址；
+2. 解析后要校验格式、地址范围、长度、对齐和溢出；
+3. 要把固件保留区、MMIO、OpenSBI、内核和运行时元数据从可分配范围中扣除；
+4. 如果没有通用固件接口，应明确说明需要板级配置或平台适配层，不能声称通用探测可以可靠识别所有硬件；
+5. 对“内存热插拔”或运行时变化，要通过固件/平台事件更新内存地图，而不是重复执行破坏性探测。
+
+[SPECIFICATION]
+
+请按“获取入口—解析—校验—建立保留表—计算空闲范围—交给页分配器”的顺序回答，并至少比较以下方案：
+
+- RISC-V 启动时由 OpenSBI/QEMU 传入 DTB；
+- 真实平台通过 SBI、UEFI memory map 或等价固件接口报告内存；
+- 没有固件地图时的板级配置和受限探测方案，以及为什么不能把它当作通用可靠方案。
+
+回答最后要用一句话说明：`get_memory_base()`/`get_memory_size()` 给出的只是硬件内存范围，`page_init()` 还要扣除保留区后才能得到真正可分配的页面范围。
+
 ## 功能模块二任务二：Best-Fit 连续物理内存分配器
 
 负责人：2511107-林永盛。

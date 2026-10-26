@@ -16,7 +16,7 @@
 |------|----------------|
 | 2511107-林永盛 | [功能模块二的任务一和任务二] |
 | 2511592-陈逍宇 | [功能模块三的任务一和任务二] |
-| 2513411-邱宇湛 | [练习或模块名称] |
+| 2513411-邱宇湛 | [功能模块一的任务一和扩展任务] |
 
 实验报告如何分工？
 | 成员 | 负责的部分 |
@@ -121,9 +121,116 @@ Buddy System 是另一种页级分配策略，按照 2 的幂管理块，通过�
 
 ### 功能模块一：物理内存初始化功能
 
-**负责人：** [学号-姓名]
+**负责人：** 2513411-邱宇湛
 
-[待负责同学填写模块功能描述、最终提示词和实现迭代过程。]
+#### 任务一：实现物理内存探测与页描述符初始化功能
+
+##### 模块功能描述
+
+本任务实现 `code/kern/mm/pmm.c` 中的 `static void page_init(void)`。它由 `pmm_init()` 调用，负责把设备树报告的物理内存范围转换成页分配器可以安全使用的空闲页面范围。实现先建立 `struct Page` 描述符数组，再把启动阶段已经占用的前缀排除，避免把内核或描述符数组重新交给分配器。
+
+初始化链如下：
+
+```text
+entry.S 保存 boot_dtb → kern_init() → dtb_init() 解析 /memory
+                                      ↓
+                    pmm_init() → init_pmm_manager() → page_init()
+                                      ↓
+                              init_memmap() → check_alloc_page()
+```
+
+`get_memory_base()` 返回物理地址，`get_memory_size()` 返回字节数，而 `npage`、`nbase` 和 `init_memmap()` 使用页数。`end` 和 `pages` 是内核虚拟地址，只有转换成物理地址后才能与 DTB 范围比较。
+
+##### 关键状态和实现步骤
+
+1. 读取并校验 DTB 给出的起点和长度，检查零值及整数溢出。
+2. 设置 `va_pa_offset`，用 `PPN(mem_end)` 得到物理内存末端页号 `npage`。
+3. 将 `pages` 放在链接符号 `end` 之后的下一个页边界，覆盖 `[nbase, npage)` 的描述符。
+4. 先将描述符初始化为保留状态，再计算描述符数组末端的物理地址。
+5. 将末端向上对齐，得到第一个可登记的完整物理页；`PHYSICAL_MEMORY_END` 是当前工程的管理上界。
+6. 只有剩余范围至少包含一整页时才调用 `init_memmap()`，并保留原有诊断输出和 `pmm_init()` 调用顺序。
+
+当前实现没有另建一张保留区表，而是依据内核末端、描述符数组末端和工程管理上界计算连续可登记区间；报告不把通用平台上的保留区表写成已经在本次代码中实现的功能。
+
+##### 实现迭代过程
+
+本次实现重点处理了三类边界：页数与字节数的换算、虚拟地址与物理地址的比较，以及 `Page` 描述符数组跨页占用。对无效 DTB、内核或描述符数组无法放入管理范围、以及没有完整空闲页的情况，使用 `panic()` 终止初始化，避免登记未知页面。
+
+##### 最终提示词
+
+完整提示词已同步到 [prompt.md](./prompt.md) 的“功能模块一任务一”部分：
+
+```text
+[PROMPT]
+任务：修改 code/kern/mm/pmm.c 中标记为 lab2 function1 YOUR CODE 的
+static void page_init(void)，完成物理内存探测、Page 描述符布局和空闲区登记。
+操作要求：必须修改真实项目文件，将 YOUR CODE 替换为 2513411，保留
+pmm_init() 调用顺序和诊断输出，不修改其他分配器、测试或评分脚本。
+输出要求：说明修改文件、地址和页数单位、保留区与空闲区，并报告真实测试结果。
+
+[RELY]
+使用 get_memory_base()/get_memory_size()、PHYSICAL_MEMORY_OFFSET、
+PHYSICAL_MEMORY_END、PGSIZE、PPN、ROUNDUP、ROUNDDOWN、PADDR、pa2page、
+init_memmap() 以及 pages、npage、nbase、va_pa_offset、end 等真实定义。
+
+[GUARANTEE]
+必须实现 static void page_init(void)。成功后，描述符数组覆盖 [nbase,npage)，
+已占用前缀不会进入空闲区，完整空闲页交给当前 pmm_manager；无效 DTB、溢出、
+无法覆盖内核或描述符数组、没有完整空闲页时必须终止，超过 PHYSICAL_MEMORY_END
+的范围按工程上界截断。
+
+[SPECIFICATION]
+Pre-Condition：DTB 和 pmm_manager 已初始化，页面范围尚未登记。
+Post-Condition：描述符、保留状态和空闲页统计与物理范围一致。
+Case 1：输入无效或无法容纳内核/描述符数组时终止且不调用 init_memmap()。
+Case 2：存在完整空闲页时按页对齐登记连续范围。
+Case 3：剩余空间不足一页时终止，不创建零长度空闲区。
+Requirements：统一使用物理地址比较，不改变 nbase、调用顺序或其他模块。
+```
+
+#### 扩展任务：硬件的可用物理内存范围获取方法
+
+##### 思考题回答
+
+操作系统不应通过随便读写物理地址来猜测内存范围，因为物理地址空间中可能存在 MMIO、固件保留区和空洞。可靠做法是读取启动固件提供的内存地图并校验它。
+
+本实验中，`entry.S` 从寄存器 `a1` 保存 `boot_dtb`，`dtb_init()` 解析 DTB 的 `/memory` 节点和 `reg` 属性，提供 `get_memory_base()` 与 `get_memory_size()`。随后还要排除启动阶段已经占用的范围，并按页对齐后交给分配器。
+
+```text
+固件/DTB 提供范围 → 解析并校验 → 建立保留区信息
+                         ↓
+        扣除 OpenSBI、内核、页表、设备树和运行时元数据
+                         ↓
+             计算完整可分配页 → 交给 pmm_manager
+```
+
+真实平台还可能通过 SBI、UEFI memory map 或其他固件接口报告内存。没有通用固件地图时，只能使用板级配置或受限的平台探测，不能把它当成适用于所有硬件的可靠方案。内存热插拔也应由固件或平台事件更新内存地图，而不是重复执行破坏性探测。
+
+因此，`get_memory_base()` 和 `get_memory_size()` 只是硬件报告范围；扣除保留区并完成页面对齐后，才得到操作系统真正可分配的页面范围。
+
+##### 扩展任务提示词
+
+```text
+[PROMPT]
+任务：回答如何在编译时未知硬件内存范围的情况下可靠获取它，结合 RISC-V uCore
+的 boot_dtb、DTB /memory、OpenSBI 和 page_init()，区分报告范围与可分配范围。
+操作要求：只依据真实启动流程和平台接口分析，不修改工程代码，不把未经固件声明的
+地址当作 RAM。输出要求：按获取入口、解析校验、保留区处理和交给页分配器的顺序回答。
+
+[RELY]
+entry.S 从 a1 保存 boot_dtb，dtb.c 解析 reg 并提供 get_memory_base()/get_memory_size()；
+还需考虑固件、内核、页表、设备树、Page 描述符和平台保留区，并比较 DTB/SBI、UEFI
+memory map 及无固件地图时的板级配置。
+
+[GUARANTEE]
+优先使用固件内存地图，校验格式、地址、长度、对齐和溢出，建立保留区信息后计算空闲页；
+不得把盲目读写物理地址当作通用可靠探测。
+
+[SPECIFICATION]
+按“获取入口—解析—校验—建立保留表—计算空闲范围—交给页分配器”作答，说明无固件
+地图时的限制和热插拔更新原因，最后明确 get_memory_base()/get_memory_size() 不是最终
+可分配范围。
+```
 
 ---
 
@@ -861,6 +968,79 @@ full→partial→empty，以及额外空 slab 的回收。
 ---
 
 ## 五、测试与验证
+
+### 功能模块一·任务一：物理内存探测与页描述符初始化
+
+本节记录 2513411-邱宇湛负责的模块一任务一和扩展任务验证。源码目录为 `C:\Users\34463\Desktop\System-Software\code`，报告目录为 `report/`。
+
+#### 1. 编译验证
+
+在 WSL Ubuntu 中执行：
+
+```bash
+cd /mnt/c/Users/34463/Desktop/System-Software/code
+make clean
+make -j2
+```
+
+构建退出状态为 0，生成 `bin/kernel` 和 `bin/ucore.img`。本次代码修改只涉及 `kern/mm/pmm.c` 中的 `page_init()`，没有改动其他成员的分配器实现。
+
+![模块一编译输出](./images/module1-build.png)
+
+#### 2. QEMU 启动与内核自检
+
+执行 `timeout 35s make qemu`。内核自检完成后实验入口保持运行，命令由超时结束；关键输出如下：
+
+```text
+DTB Init
+Physical Memory from DTB:
+  Base: 0x0000000080000000
+  Size: 0x0000000008000000 (128 MB)
+  End:  0x0000000087ffffff
+memory management: buddy_pmm_manager
+physical memory: [0x0000000080000000, 0x0000000088000000)
+managed memory ends at: 0x0000000088000000
+Page descriptors: [0x0000000080508000, 0x0000000080648000)
+free physical pages: 31160
+buddy_check() succeeded!
+check_alloc_page() succeeded!
+slub_check() succeeded!
+```
+
+输出证明 `page_init()` 读取了 DTB 范围，建立了按页对齐的描述符数组，并把描述符数组之后的完整页面交给当前管理器。当前管理器仍是 Buddy，属于其他成员的代码，本次没有替换。
+
+![模块一 QEMU 输出](./images/module1-qemu.png)
+
+#### 3. 课程注入测试与评分边界
+
+原始 `tools/grade.sh` 在 WSL 中因 CRLF 换行导致解析失败。为避免修改正式脚本，在临时副本中只转换评分脚本换行后运行同一套测试：
+
+```bash
+python3 tools/inject.py /tmp/lab2-module1-copy
+sed -i 's/\r$//' /tmp/lab2-module1-copy/tools/grade.sh
+make -C /tmp/lab2-module1-copy -j2
+(cd /tmp/lab2-module1-copy && sh tools/grade.sh -v)
+```
+
+真实结果为：
+
+```text
+[Test 1] Page Init: PASS
+[Test 2] Best-Fit: FAIL (pmm_manager=buddy_pmm_manager)
+```
+
+因此模块一的页面初始化检查已通过；Best-Fit 失败是当前项目仍选择 `buddy_pmm_manager` 导致的模块二问题，本次没有修改它。
+
+![模块一课程测试输出](./images/module1-grade.png)
+
+原始日志保存在：
+
+- [`build_after.log`](./images/build_after.log)
+- [`qemu_after_full.log`](./images/qemu_after_full.log)
+- [`grade_after_fixed_newline.log`](./images/grade_after_fixed_newline.log)
+- [`grade_after_qemu.log`](./images/grade_after_qemu.log)
+
+---
 
 ### 功能模块二·任务二：Best-Fit 连续物理内存分配算法
 
