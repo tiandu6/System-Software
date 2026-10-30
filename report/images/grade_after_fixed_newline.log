@@ -1,3 +1,0 @@
-  -check page init:                          OK
-  -check best fit:                           WRONG
-   -e !! error: missing '[Test 2] Best-Fit: PASS'
