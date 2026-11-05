@@ -413,30 +413,358 @@ __alltraps:
 
 **负责人：** 2511592-陈逍宇、2513411-邱宇湛
 
+#### 模块功能描述
+
+**需要实现的 C 语言接口：**
+
+```c
+// kern/trap/trap.c
+void interrupt_handler(struct trapframe *tf);
+void exception_handler(struct trapframe *tf);
+```
+
+**与之衔接的已有接口和状态：**
+
+```c
+void print_trapframe(struct trapframe *tf);
+void clock_set_next_event(void);
+extern volatile size_t ticks;
+void sbi_shutdown(void);
+#define TICK_NUM 100
+static void print_ticks();
+```
+
+**功能说明：**
+
+模块一负责把现场交给 `trap()` 并在处理结束后恢复执行，本模块决定“本次 Trap 应该如何处理”。已有 `trap_dispatch()` 根据 `cause` 最高位分发：最高位为 1 时调用 `interrupt_handler()`，否则调用 `exception_handler()`。两个函数使用同一份 Trap frame，处理结束后回到已有的统一返回路径。
+
+时钟中断需要预约下一次事件、增加计数、周期输出，并在累计输出达到规定次数后关机；其他已知中断输出类别提示，未知中断输出原因编号和完整 Trap frame。非法指令和断点异常需要输出发生地址并推进 `epc`，避免返回后重复触发；其他异常保留现场并打印，作为诊断兜底。
+
+#### 关键状态和实现步骤
+
+**1. 区分中断类型位与原因编号**
+
+RV64 的 `cause` 最高位是中断标志，不能直接把带标志的完整值与 `IRQ_S_TIMER` 等编号比较。本实现只在局部变量中清除该位：
+
+```c
+uintptr_t cause = tf->cause &
+    ~((uintptr_t)1 << (sizeof(uintptr_t) * 8 - 1));
+```
+
+使用掩码不会改变 `tf->cause`，也兼容课程测试直接传入没有最高位标志的 `15`。如果使用异或去位，未置位输入会被错误地加上最高位；本次直接调用测试同时检查 `15` 和带最高位的 `15`，两者均输出 `Unknown interrupt: cause 15`。
+
+**2. S 模式时钟中断：重设事件、计数、输出和关机**
+
+时钟分支的核心实现为：
+
+```c
+case IRQ_S_TIMER:
+    clock_set_next_event();
+    ticks++;
+    if (ticks % TICK_NUM == 0) {
+        print_ticks();
+        if (ticks / TICK_NUM >= SHUTDOWN_AFTER) {
+            sbi_shutdown();
+        }
+    }
+    break;
+```
+
+`clock_init()` 只预约第一次时钟事件。SBI 的定时接口每次设置一个目标时刻，因此每次中断都必须调用 `clock_set_next_event()`；只增加 `ticks` 会使后续时钟事件无法持续发生。`ticks` 在 `clock.c` 中声明为 `volatile size_t`，每次 S 时钟中断恰好加 1。
+
+`TICK_NUM` 是每次统计间隔，`SHUTDOWN_AFTER` 是累计输出次数，两者含义不同。框架未提供后者，本模块在填空区域使用 `#ifndef SHUTDOWN_AFTER` 定义默认值 10，允许通过编译参数覆盖。默认状态变化为：
+
+| 增加后的 ticks | 本次统计输出 | 累计输出次数 | 是否调用关机接口 |
+|----------------|--------------|--------------|------------------|
+| 1～99 | 无 | 0 | 否 |
+| 100 | `100 ticks` | 1 | 否 |
+| 200 | `100 ticks` | 2 | 否，课程持续时钟用例可完成 |
+| 1000 | `100 ticks` | 10 | 是 |
+
+输出复用已有 `print_ticks()`，没有改成累计数值，也没有改变其 `DEBUG_GRADE` 条件行为。默认运行实测恰好输出 10 行后退出；临时副本用 `-DSHUTDOWN_AFTER=1` 构建时，恰好输出一行后关机。时钟计数为后续调度提供基础，本模块没有实现进程调度。
+
+**3. 其他中断与未知中断的处理**
+
+其余分支按 `riscv.h` 中现有的软件、定时器、外部、协处理器和主机中断常量输出类别提示。例如 S 软件中断输出 `Supervisor software interrupt`。这些分支不更新 `ticks` 或 `epc`。头文件中的类别名称属于框架接口，分类输出本身不表示已实现相应硬件驱动、清除设备中断源或所有来源的实际委托。
+
+无法识别的编号先输出 `Unknown interrupt: cause N`，再调用 `print_trapframe(tf)`。清除类型位只影响局部编号，诊断仍使用原始帧。中断处理函数没有修改保存的任何寄存器或返回地址，因此异步中断结束后继续被打断的执行流。
+
+**4. 非法指令和断点：先输出原地址，再按指令长度推进 epc**
+
+`exception_handler()` 根据原始异常原因分类：
+
+| 异常原因 | 输出内容 | 返回位置处理 |
+|----------|----------|--------------|
+| `CAUSE_ILLEGAL_INSTRUCTION` | `Illegal instruction at 0x...` | 按该指令的 2/4 字节长度推进 |
+| `CAUSE_BREAKPOINT` | `Breakpoint at 0x...` | 按该指令的 2/4 字节长度推进 |
+| 其他异常 | `print_trapframe(tf)` | 保留原 epc，直接返回 |
+
+地址输出使用 `%p`，保留 RV64 地址宽度。两个要求跳过的分支共用以下长度判断：
+
+```c
+uint16_t instruction = *(const uint16_t *)tf->epc;
+tf->epc += (instruction & 0x3) == 0x3 ? 4 : 2;
+```
+
+RISC-V 的 16 位压缩指令低两位不为 `11`；在本实验要求处理的 16/32 位集合内，低两位为 `11` 对应 32 位指令。因此不能把所有异常固定推进 4 字节，也不能简单规定“断点加 2、非法指令加 4”。`c.ebreak` 为 2 字节，`ebreak` 为 4 字节，两种长度的非法指令也分别需要处理。
+
+这里只读取首个 16 位半字，允许指令位于仅按 2 字节对齐的地址。前提是已知异常的 `epc` 可读取，且待跳过的指令为 16 或 32 位；本模块没有实现 48 位及更长指令解码。其他异常分支在读取指令之前就返回，不会擅自解引用可能无效的地址。兜底打印也没有解决原异常，返回到未修复的指令仍可能再次触发 Trap。
+
+**5. 与统一返回机制配合**
+
+两个函数均不直接写硬件 `sepc`，也不执行 `sret`。异常分支修改的是帧中的 `tf->epc`，随后模块一的 `RESTORE_ALL` 将其恢复到 `sepc`；中断分支保留 `epc`。其余通用寄存器和状态字段保持不变，使“事件处理决定返回位置，统一恢复路径执行返回”的职责关系一致。
+
+代码保留 `lab3 function2` 注释，将 `YOUR CODE` 替换为 `2511592 2513411`；新增头文件和宏也位于该标记区域。已有 `print_ticks()`、`trap_dispatch()`、`trap()`、模块一汇编和教师测试逻辑均保持原有内容。
+
+#### Spec 与 Prompt 的设计思路
+
+我们以[网页练习要求](http://oslab.mobisys.top/lab2026/_book/lab3/lab3_2_1_exercise.html)为依据，按四段式组织提示词。[PROMPT] 明确目标文件、两个函数、学号标记和修改范围；[RELY] 列出真实的 Trap frame、时钟和 SBI 接口、原因常量及指令长度约束；[GUARANTEE] 固定公开接口和交付行为；[SPECIFICATION] 则把状态变化拆成可以验证的条件。
+
+| 规格部分 | interrupt_handler | exception_handler |
+|----------|-------------------|-------------------|
+| Pre-Condition | 有效帧，时钟已初始化，计数未溢出，输出间隔和关机阈值有效 | 有效帧；已知异常的指令半字可读取，待跳过指令为 16/32 位 |
+| Post-Condition | 保留帧；只有 S 时钟分支更新 ticks | 已知异常仅更新 epc，其他异常保留全帧 |
+| Case | S 时钟；其他已知中断；未知中断 | 非法指令；断点；其他异常 |
+| Requirements | 每次重设事件，每次加 1，按输出次数关机，正确清除类型位 | 根据编码判断长度，先输出原地址，不对未知异常统一跳过 |
+
+#### 最终提示词
+
+以下为结合本次实现和实际验证整理的最终提示词，与 `prompt.md` 的模块二内容一致：
+
+````markdown
+[PROMPT]
+
+**任务**：在当前 uCore Lab3 工程中，修改 `code/kern/trap/trap.c`，完成“功能模块二：中断与异常处理功能”，实现 `interrupt_handler(struct trapframe *tf)` 和 `exception_handler(struct trapframe *tf)`，使其与已有的 Trap 分发、上下文恢复和 `sret` 返回流程配合。
+
+**操作要求**：必须修改项目中的实际文件。新增生产代码限定在 `lab3 function2 YOUR CODE` 标记区域，保留 `lab3 function2` 注释，并将 `YOUR CODE` 替换为 `2511592 2513411`。可以在该区域引入 `sbi.h`、定义本模块需要的宏。不得修改 `print_ticks()`、`trap_dispatch()`、`trap()`、`SAVE_ALL`、`RESTORE_ALL`、Trap frame 布局或教师测试；不得实现 Challenge，不提交或推送 Git。
+
+**输出要求**：依据下面的真实依赖和行为规格实现，说明原因编号提取、下一次时钟事件设置、异常指令长度判断和返回地址更新的依据。实际执行构建、QEMU 启动及原课程评分，记录命令、结果和环境问题。补充验证应使用临时工程副本，不把测试入口写入正式启动流程；保留真实日志，截图应注明取材方式。
+
+[RELY]
+
+1. 先读取工程中的 `trap.c`、`trap.h`、`libs/riscv.h`、`libs/defs.h`、`kern/driver/clock.h`、`kern/driver/clock.c`、`libs/sbi.h`、`tools/grade.sh` 和 `tools/test_lab3.c`，以实际定义为准。
+
+2. 当前目标为 RV64，`uintptr_t` 为 64 位。已有上下文结构如下：
+
+```c
+struct trapframe {
+    struct pushregs gpr;
+    uintptr_t status;
+    uintptr_t epc;
+    uintptr_t badvaddr;
+    uintptr_t cause;
+};
+```
+
+`cause` 最高位表示中断，其余位为原因编号；同步异常的最高位为 0。已有 `trap_dispatch()` 通过 `(intptr_t)tf->cause < 0` 分发。两个处理函数只处理 C 层行为，由模块一从同一份帧恢复现场并执行 `sret`。
+
+3. 已有接口和状态：
+
+```c
+void print_trapframe(struct trapframe *tf);
+void clock_set_next_event(void);
+extern volatile size_t ticks;
+void sbi_shutdown(void);
+#define TICK_NUM 100
+static void print_ticks();
+```
+
+`clock_init()` 将 `ticks` 初始化为 0，并预约第一次时钟事件；`clock_set_next_event()` 通过 SBI 设置下一次事件。`print_ticks()` 已在同一文件实现，普通构建每次输出一行 `100 ticks`；保留其原有 `DEBUG_GRADE` 条件行为。
+
+4. 工程提供 `IRQ_U/S/H/M_SOFT`、`IRQ_U/S/H/M_TIMER`、`IRQ_U/S/H/M_EXT`，以及 `IRQ_COP`、`IRQ_HOST` 常量。它们表示现有头文件列出的原因编号；按这些符号分类输出，不据此声称所有来源都能实际委托到当前 S 模式内核。
+
+5. 异常原因使用 `CAUSE_ILLEGAL_INSTRUCTION` 和 `CAUSE_BREAKPOINT`。本实验要求恢复的指令限定为 16 位和 32 位；读取 `epc` 处的首个 16 位半字，低两位不等于 `11` 时长度为 2 字节，在本实验的指令集合中低两位等于 `11` 时长度为 4 字节。不扩展为对 48 位及更长指令的通用处理。
+
+6. 当前框架没有定义 `SHUTDOWN_AFTER`。在本模块区域中用 `#ifndef` 提供默认值 10，允许通过 `-DSHUTDOWN_AFTER=1` 等编译参数覆盖；其含义是统计输出次数，要求为正整数。默认配置第 1000 次 S 时钟中断完成第 10 次输出后关机，课程持续时钟测试需要运行到 `ticks=200`。
+
+[GUARANTEE]
+
+必须实现以下两个公开接口，保留名称、参数和返回类型：
+
+```c
+void interrupt_handler(struct trapframe *tf);
+void exception_handler(struct trapframe *tf);
+```
+
+- `interrupt_handler()`：根据原因分类处理中断，S 时钟中断完成重设事件、计数、周期输出和达到阈值后的关机。
+- `exception_handler()`：非法指令和断点输出地址并正确推进 `epc`；其他异常输出完整帧。
+- 除异常分支对 `tf->epc` 的规定更新外，不修改保存的通用寄存器、`status`、`badvaddr` 和 `cause`，也不改变现有分发与返回接口。
+
+[SPECIFICATION]
+
+## interrupt_handler
+
+**Pre-Condition**：
+- `tf` 指向有效、可读取的 Trap frame，执行环境允许使用控制台和 SBI 接口。
+- 正常调用来自 `trap_dispatch()`；直接测试也可能传入不带中断最高位的原因编号。
+- 正常时钟路径中，`clock_init()` 已执行，`ticks` 为自初始化后收到的 S 时钟中断次数，测试期间不发生计数溢出。
+- `TICK_NUM=100`，`SHUTDOWN_AFTER` 为正整数。
+
+**Post-Condition**：
+- 使用去除最高位后的局部原因编号进行分类，保留 `tf->cause` 原值。
+- 若返回，`tf` 的全部字段保持不变；不自行改变中断的返回地址。
+- 只有 `IRQ_S_TIMER` 改变 `ticks`；其他原因不会触发时钟统计或关机逻辑。
+
+**Case 1**：`IRQ_S_TIMER`。
+- 每次调用 `clock_set_next_event()` 预约下一次事件，`ticks` 恰好增加 1。
+- 增加后的 `ticks` 为 `TICK_NUM` 整数倍时，调用已有 `print_ticks()`。
+- 累计输出次数达到 `SHUTDOWN_AFTER` 后，调用 `sbi_shutdown()`；默认在第 10 行 `100 ticks` 输出后关机。
+
+**Case 2**：框架列出的其他软件、定时器、外部、协处理器和主机中断。
+- 输出相应类别提示；S 软件中断必须输出 `Supervisor software interrupt`。
+- 这些分支只做实验要求的类别识别和提示，不增加 `ticks`，不额外实现设备应答或中断控制器驱动。
+
+**Case 3**：未知中断。
+- 输出 `Unknown interrupt: cause N`，其中 `N` 是无符号原因编号，再调用 `print_trapframe(tf)`。
+- 直接传入 `15` 或带最高位的 `15` 时，均应输出原因 `15`，不能把类型位混进编号。
+
+**Requirements**：
+- 每次 S 时钟中断都重新设置下一次事件，不能只在首次或输出统计时设置。
+- 原因编号的掩码与 `uintptr_t` 的宽度一致，不使用会破坏无标志直接测试输入的异或去位方式。
+- 统计输出使用已有函数，保留默认配置运行到 `ticks=200` 的能力。
+- 不在本函数中调用 `sret`、手工恢复寄存器或重新打开全局中断。
+
+## exception_handler
+
+**Pre-Condition**：
+- `tf` 指向有效 Trap frame，`tf->cause` 为同步异常原因。
+- 对非法指令和断点，`tf->epc` 指向可读取、至少按 2 字节对齐的指令半字；本实验待跳过的指令长度为 2 或 4 字节。
+- 对其他异常，不假定 `epc` 可解引用，也不要求实现具体恢复策略。
+
+**Post-Condition**：
+- 非法指令和断点在输出原始发生地址后，将 `epc` 推进至该指令之后。
+- 其他异常调用 `print_trapframe(tf)`，帧的所有字段保持不变。
+- 所有分支均不修改 `cause`、`status`、`badvaddr` 或保存的通用寄存器。
+
+**Case 1**：`CAUSE_ILLEGAL_INSTRUCTION`。输出 `Illegal instruction at 0x...`，地址为更新前的 `epc`；16 位非法指令推进 2 字节，32 位非法指令推进 4 字节。
+
+**Case 2**：`CAUSE_BREAKPOINT`。输出 `Breakpoint at 0x...`，地址为更新前的 `epc`；16 位 `c.ebreak` 推进 2 字节，32 位 `ebreak` 推进 4 字节，使返回后继续执行后续指令。
+
+**Case 3**：其他异常。仅调用 `print_trapframe(tf)` 后返回；不读取指令、不统一跳过，也不把诊断输出解释为异常已被修复。
+
+**Requirements**：
+- 通过首个 16 位半字的编码判断本实验中的 2/4 字节长度，不能固定 `epc += 4`，也不能仅根据异常种类猜测长度。
+- 使用 16 位读取，允许 32 位指令从仅按 2 字节对齐的地址开始；不要直接依赖 32 位对齐读取。
+- 地址输出保留 RV64 地址宽度，使用工程支持的 `%p` 或等效格式。
+- 不直接修改硬件 `sepc`，由统一恢复路径采用帧内更新后的 `epc`。
+
+## 验证要求
+
+- 先完成完整构建，再运行正常 `make qemu` 和原课程 `make grade`。默认应输出 10 行 `100 ticks` 后自动关机；课程三项得分应按实际结果记录。
+- 当前 GCC 14.2 汇编器不接受框架旧 CSR 名 `sbadaddr` 时，使用编译参数 `DEFS=-Dsbadaddr=stval` 做名称映射，不改模块一的保存布局。对评分子构建，应通过环境传递该参数，保留各评分宏的追加。
+- Windows 检出可能使 `tools/grade.sh` 使用 CRLF；遇到 `Illegal option -` 或回车相关错误时，只转换行尾为 LF，保留教师测试内容和断言。
+- 增补真实 16/32 位断点、16/32 位非法指令的 Trap 返回，以及未知原因、现场保持、仅按半字对齐的指令读取和关机阈值覆盖测试。测试在临时工程副本执行，生产启动代码不插入测试调用。
+- 明确区分实际硬件 Trap、构造帧直接调用和课程测试的覆盖范围，只有实际执行成功后才写入报告。
+````
+
+#### 实现迭代过程
+
+本次补全分为 3 轮实现与验证，记录实际问题及处理过程。
+
+
+##### 第一次迭代：解决工具链与脚本行尾问题
+
+**遇到的问题：**
+
+- 本次 WSL Ubuntu 使用 `riscv64-unknown-elf-gcc 14.2.0` 和 `QEMU 4.1.1`。汇编器报告 `unknown CSR 'sbadaddr'`，这是框架旧 CSR 名称与当前工具链之间的兼容问题。
+- 首次进入评分脚本时，Windows 检出的 CRLF 行尾导致 `tools/grade.sh: ... not found` 和 `set: Illegal option -`，评分尚未执行到用例。
+
+**问题解决策略：**
+
+- 使用 `DEFS=-Dsbadaddr=stval` 在编译阶段映射 CSR 名称，保留模块一汇编源码和保存布局。评分时通过环境变量传入，允许脚本继续追加各自的 `GRADE_LAB3_*` 宏。
+- 将 `tools/grade.sh` 行尾转换为 LF，保持教师测试文本、用例和断言不变。复现命令统一列在第五部分。
+
+##### 第二次迭代：补充长度、兜底与关机边界验证
+
+**遇到的问题：**
+
+课程评分能够验证整体衔接，但没有分别展示 16/32 位两种断点、两种非法指令，以及改变关机阈值后的行为；仅以总分无法说明这些边界已经覆盖。
+
+**问题解决策略：**
+
+增加 `tools/test_module2/checks.c` 和 `tools/test_module2/run.py`。脚本复制工程至临时目录，只在副本插入检查调用，链接实际的 `trap.c` 和 `trapentry.S`，正式启动流程不插入测试代码：
+
+- 用 `.half 0x9002`、`.word 0x00100073` 触发 16/32 位断点，并确认后续代码继续执行。
+- 用 `.half 0x0000`、`.word 0x0000007b` 触发 16/32 位非法指令，并确认返回。
+- 构造 S 软件中断、带/不带最高位的未知中断和原因 20 的未知异常，断言 `ticks` 及完整 Trap frame 的保持关系。
+- 直接调用已知异常处理函数，验证从仅按 2 字节对齐的位置读取 32 位指令时，`epc` 正确增加 4。
+- 再用 `SHUTDOWN_AFTER=1` 构建普通启动副本，确认只输出一次统计后正常退出。
+
+上述检查均通过。后几项构造帧测试验证的是处理函数行为，不代表实际产生了对应设备中断或未知异常；真实指令触发的四项测试则经过了生产 Trap 入口和返回路径。
+
+**最终结果：**
+
+- 本次于 **2026-11-05** 完成验证；完整工程构建通过。
+- 正常 `make qemu` 输出 10 行 `100 ticks` 后自动关机，退出状态为 0。
+- 原课程评分为 **35/35、25/25、40/40，总分 100/100**。
+- 补充验证全部通过，日志输出 `ALL MODULE2 VALIDATIONS PASSED`。
+- 实际日志、截图及复现方式见第五部分。覆盖范围为本实验的 S 时钟处理、16/32 位异常跳过和规定兜底行为，不包含通用异常恢复、完整设备驱动或进程调度。
+
 ---
 
 ## 五、测试与验证
 
-<!-- 根据该实验的具体情况，提供完整的测试运行截图，应包含：
-- 编译及运行成功的输出（make qemu），可能有多个
-- 测试通过的结果（make grade），只有一个
--->
+本节为 2026-11-05 在 WSL Ubuntu 上对当前工程的实际验证。工具链为 `riscv64-unknown-elf-gcc 14.2.0`，模拟器为 `QEMU 4.1.1`。
+
+在 WSL 中进入本仓库的 `code/`，依次执行：
+
+```bash
+# Windows 检出使用 CRLF 时，仅将评分脚本行尾转换为 LF。
+sed -i 's/\r$//' tools/grade.sh
+
+# 环境变量保留 CSR 名称映射，各课程用例可继续追加自己的评分宏。
+env DEFS=-Dsbadaddr=stval make grade
+
+# 评分后重新构建普通内核，避免沿用评分配置。
+env DEFS=-Dsbadaddr=stval make -j2
+env DEFS=-Dsbadaddr=stval timeout 20s make qemu
+
+# 补充测试在临时工程副本运行，不修改正式启动流程。
+python3 tools/test_module2/run.py
+```
 
 ### 1. 编译及内核运行（make qemu）
 
 **测试截图：**
 
-![编译及内核运行截图](./images/lab3-qemu.png)
+![真实终端中的正常内核运行截图](./images/module2-qemu.png)
 
-图 1：执行 make qemu 后，内核启动并通过物理内存自检，随后连续输出 10 次 100 ticks。
+图 1：本次完整构建生成 `bin/kernel` 和 `bin/ucore.img`。正常内核启动、物理内存自检通过，时钟初始化后连续输出 10 行 `100 ticks`，达到默认累计输出阈值后自动关机，`make qemu` 退出状态为 0。`timeout` 只用于限制异常运行时长，本次未因超时退出。
+
 
 ### 2. 课程测试结果（make grade）
 
 **测试截图：**
 
-![测试结果截图](./images/test_result.png)
+![真实终端中的课程评分结果截图](./images/module2-grade.png)
 
-图 2：make grade 的上下文与断点返回、非法指令处理和持续时钟中断三项测试全部通过，总分为 100/100。
+图 2：原课程脚本的三项测试全部通过，总分 **100/100**，命令退出状态为 0。截图保留该次终端运行中的编译和评分输出，完整日志中也保留各次构建输出。
+
+| 课程测试 | 实际结果 | 验证重点 |
+|----------|----------|----------|
+| Trap 入口、寄存器恢复和断点返回 | 35/35 | 模块一与模块二的调用、现场恢复及断点 epc 更新能够衔接 |
+| 非法指令返回及兜底输出 | 25/25 | 非法指令跳过、S 软件中断提示、未知中断编号及未知异常帧输出 |
+| 重设时钟和反复 Trap 返回 | 40/40 | 时钟持续触发到 `ticks=200`，输出统计后仍能继续执行 |
+
+完整日志：[module2-grade.txt](./logs/module2-grade.txt)。
+
+### 3. 模块二补充验证
+
+**测试截图：**
+
+![真实终端中的模块二补充测试截图](./images/module2-supplemental.png)
+
+图 3：`python3 tools/test_module2/run.py` 的补充验证全部通过。脚本在临时副本链接真实处理函数和 Trap 汇编，先执行异常与状态保持检查，再单独构建关机阈值为 1 的普通内核。
+
+| 测试场景 | 验证方式 | 实际结果 |
+|----------|----------|----------|
+| 16 位 `c.ebreak` 与 32 位 `ebreak` | 执行真实指令，经 Trap 入口和 `sret` 返回后打印 PASS | 两项均通过 |
+| 16 位 `0x0000` 与 32 位 `0x0000007b` 非法指令 | 执行真实指令，返回后继续执行 | 两项均通过 |
+| S 软件中断、未知原因 15（带/不带最高位） | 构造帧直接调用，比较完整帧及 ticks | 提示正确，原现场和计数均不变 |
+| 原因 20 的未知异常 | 构造帧直接调用，比较完整帧 | 打印 `cause 0x00000014`，不推进 epc |
+| 仅按 2 字节对齐的 32 位指令 | 读取首个半字，直接验证 epc 和其他字段 | epc 增加 4，其余字段不变 |
+| `SHUTDOWN_AFTER=1` | 临时副本重新构建并正常启动 | 恰好一行 `100 ticks`，QEMU 正常退出 |
+
 
 ---
 

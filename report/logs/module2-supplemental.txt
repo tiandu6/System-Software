@@ -1,0 +1,268 @@
+$ make -j2 DEFS+=-Dsbadaddr=stval
++ cc kern/init/init.c
++ cc kern/init/entry.S
++ cc kern/init/module2_checks.c
++ cc kern/libs/stdio.c
++ cc kern/debug/kdebug.c
++ cc kern/debug/kmonitor.c
++ cc kern/debug/panic.c
++ cc kern/driver/clock.c
++ cc kern/driver/console.c
++ cc kern/driver/dtb.c
++ cc kern/driver/intr.c
++ cc kern/trap/trap.c
++ cc kern/trap/trapentry.S
++ cc kern/mm/best_fit_pmm.c
++ cc kern/mm/default_pmm.c
++ cc kern/mm/pmm.c
++ cc libs/printfmt.c
++ cc libs/readline.c
++ cc libs/sbi.c
++ cc libs/string.c
++ ld bin/kernel
+riscv64-unknown-elf-objcopy bin/kernel --strip-all -O binary bin/ucore.img
+$ qemu-system-riscv64 (module-two supplemental checks)
+
+OpenSBI v0.4 (Jul  2 2019 11:53:53)
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name          : QEMU Virt Machine
+Platform HART Features : RV64ACDFIMSU
+Platform Max HARTs     : 8
+Current Hart           : 0
+Firmware Base          : 0x80000000
+Firmware Size          : 112 KB
+Runtime SBI Version    : 0.1
+
+PMP0: 0x0000000080000000-0x000000008001ffff (A)
+PMP1: 0x0000000000000000-0xffffffffffffffff (A,R,W,X)
+DTB Init
+HartID: 0
+DTB Address: 0x82200000
+Physical Memory from DTB:
+  Base: 0x0000000080000000
+  Size: 0x0000000008000000 (128 MB)
+  End:  0x0000000087ffffff
+DTB init completed
+(THU.CST) os is loading ...
+Special kernel symbols:
+  entry  0xffffffffc0200054 (virtual)
+  etext  0xffffffffc02022ea (virtual)
+  edata  0xffffffffc0207028 (virtual)
+  end    0xffffffffc0207498 (virtual)
+Kernel executable memory footprint: 30KB
+memory management: best_fit_pmm_manager
+physical memory: [0x0000000080000000, 0x0000000088000000)
+managed memory ends at: 0x0000000088000000
+Page descriptors: [0x0000000080208000, 0x0000000080348000)
+free physical pages: 31928
+check_alloc_page() succeeded!
+satp virtual address: 0xffffffffc0206000
+satp physical address: 0x0000000080206000
+Breakpoint at 0xffffffffc02000c0
+[M2] 16-bit c.ebreak returned: PASS
+Breakpoint at 0xffffffffc02000d0
+[M2] 32-bit ebreak returned: PASS
+Illegal instruction at 0xffffffffc02000e0
+[M2] 16-bit illegal instruction returned: PASS
+Illegal instruction at 0xffffffffc02000f0
+[M2] 32-bit illegal instruction returned: PASS
+Supervisor software interrupt
+Unknown interrupt: cause 15
+trapframe at 0xffffffffc0205d80
+  zero     0x00000000
+  ra       0x00000000
+  sp       0x00000000
+  gp       0x00000000
+  tp       0x00000000
+  t0       0x00000000
+  t1       0x00000000
+  t2       0x00000000
+  s0       0x00000000
+  s1       0x00000000
+  a0       0x00000000
+  a1       0x00000000
+  a2       0x00000000
+  a3       0x00000000
+  a4       0x00000000
+  a5       0x00000000
+  a6       0x00000000
+  a7       0x00000000
+  s2       0x00000000
+  s3       0x00000000
+  s4       0x00000000
+  s5       0x00000000
+  s6       0x00000000
+  s7       0x00000000
+  s8       0x00000000
+  s9       0x00000000
+  s10      0x00000000
+  s11      0x00000000
+  t3       0x00000000
+  t4       0x00000000
+  t5       0x00000000
+  t6       0x00000000
+  status   0x00000000
+  epc      0xc02000a4
+  badvaddr 0x00000000
+  cause    0x0000000f
+Unknown interrupt: cause 15
+trapframe at 0xffffffffc0205d80
+  zero     0x00000000
+  ra       0x00000000
+  sp       0x00000000
+  gp       0x00000000
+  tp       0x00000000
+  t0       0x00000000
+  t1       0x00000000
+  t2       0x00000000
+  s0       0x00000000
+  s1       0x00000000
+  a0       0x00000000
+  a1       0x00000000
+  a2       0x00000000
+  a3       0x00000000
+  a4       0x00000000
+  a5       0x00000000
+  a6       0x00000000
+  a7       0x00000000
+  s2       0x00000000
+  s3       0x00000000
+  s4       0x00000000
+  s5       0x00000000
+  s6       0x00000000
+  s7       0x00000000
+  s8       0x00000000
+  s9       0x00000000
+  s10      0x00000000
+  s11      0x00000000
+  t3       0x00000000
+  t4       0x00000000
+  t5       0x00000000
+  t6       0x00000000
+  status   0x00000000
+  epc      0xc02000a4
+  badvaddr 0x00000000
+  cause    0x0000000f
+[M2] software/unknown IRQs preserve frame and ticks: PASS
+trapframe at 0xffffffffc0205d80
+  zero     0x00000000
+  ra       0x00000000
+  sp       0x00000000
+  gp       0x00000000
+  tp       0x00000000
+  t0       0x00000000
+  t1       0x00000000
+  t2       0x00000000
+  s0       0x00000000
+  s1       0x00000000
+  a0       0x00000000
+  a1       0x00000000
+  a2       0x00000000
+  a3       0x00000000
+  a4       0x00000000
+  a5       0x00000000
+  a6       0x00000000
+  a7       0x00000000
+  s2       0x00000000
+  s3       0x00000000
+  s4       0x00000000
+  s5       0x00000000
+  s6       0x00000000
+  s7       0x00000000
+  s8       0x00000000
+  s9       0x00000000
+  s10      0x00000000
+  s11      0x00000000
+  t3       0x00000000
+  t4       0x00000000
+  t5       0x00000000
+  t6       0x00000000
+  status   0x00000000
+  epc      0xc02000a4
+  badvaddr 0x00000000
+  cause    0x00000014
+[M2] unknown exception preserves EPC and frame: PASS
+Illegal instruction at 0xffffffffc0205d62
+[M2] halfword-aligned 32-bit EPC advance: PASS
+ALL MODULE2 SUPPLEMENTAL TESTS PASSED
+Supplemental QEMU exit status: 0
+$ make clean
+rm -f -r obj bin
+$ make -j2 DEFS+=-Dsbadaddr=stval -DSHUTDOWN_AFTER=1
++ cc kern/init/entry.S
++ cc kern/init/init.c
++ cc kern/libs/stdio.c
++ cc kern/debug/kdebug.c
++ cc kern/debug/kmonitor.c
++ cc kern/debug/panic.c
++ cc kern/driver/clock.c
++ cc kern/driver/console.c
++ cc kern/driver/dtb.c
++ cc kern/driver/intr.c
++ cc kern/trap/trap.c
++ cc kern/trap/trapentry.S
++ cc kern/mm/best_fit_pmm.c
++ cc kern/mm/default_pmm.c
++ cc kern/mm/pmm.c
++ cc libs/printfmt.c
++ cc libs/readline.c
++ cc libs/sbi.c
++ cc libs/string.c
++ ld bin/kernel
+riscv64-unknown-elf-objcopy bin/kernel --strip-all -O binary bin/ucore.img
+
+OpenSBI v0.4 (Jul  2 2019 11:53:53)
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name          : QEMU Virt Machine
+Platform HART Features : RV64ACDFIMSU
+Platform Max HARTs     : 8
+Current Hart           : 0
+Firmware Base          : 0x80000000
+Firmware Size          : 112 KB
+Runtime SBI Version    : 0.1
+
+PMP0: 0x0000000080000000-0x000000008001ffff (A)
+PMP1: 0x0000000000000000-0xffffffffffffffff (A,R,W,X)
+DTB Init
+HartID: 0
+DTB Address: 0x82200000
+Physical Memory from DTB:
+  Base: 0x0000000080000000
+  Size: 0x0000000008000000 (128 MB)
+  End:  0x0000000087ffffff
+DTB init completed
+(THU.CST) os is loading ...
+Special kernel symbols:
+  entry  0xffffffffc0200054 (virtual)
+  etext  0xffffffffc020209e (virtual)
+  edata  0xffffffffc0207028 (virtual)
+  end    0xffffffffc0207498 (virtual)
+Kernel executable memory footprint: 30KB
+memory management: best_fit_pmm_manager
+physical memory: [0x0000000080000000, 0x0000000088000000)
+managed memory ends at: 0x0000000088000000
+Page descriptors: [0x0000000080208000, 0x0000000080348000)
+free physical pages: 31928
+check_alloc_page() succeeded!
+satp virtual address: 0xffffffffc0206000
+satp physical address: 0x0000000080206000
+++ setup timer interrupts
+100 ticks
+[M2] SHUTDOWN_AFTER=1: one output, clean shutdown: PASS
+ALL MODULE2 VALIDATIONS PASSED
