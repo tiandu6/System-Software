@@ -27,6 +27,9 @@ void idt_init(void) {
     /* Set sup0 scratch register to 0, indicating to exception vector
        that we are presently executing in the kernel */
     write_csr(sscratch, 0);
+    /*csr：控制与状态寄存器，
+    stvec：设置异常向量地址寄存器，保持__alltraps的地址，
+    sscratch：超级模式下的临时寄存器，暂存原来的栈指针sp*/
     /* Set the exception vector address */
     write_csr(stvec, &__alltraps);
 }

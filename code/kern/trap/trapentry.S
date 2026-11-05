@@ -1,5 +1,5 @@
 #include <riscv.h>
-
+    #保存sp到sscatch，在栈上保存通用寄存器
     .macro SAVE_ALL
 
     csrw sscratch, sp
@@ -41,6 +41,8 @@
     # get sr, epc, badvaddr, cause
     # Set sscratch register to 0, so that if a recursive exception
     # occurs, the exception vector knows it came from the kernel
+    # sepc是trap返回地址，scause是trap类型，sbadaddr是trap附加信息
+    # 将sp, sstatus, sepc, sbadaddr, scause存在s0~s4里，供后续使用
     csrrw s0, sscratch, x0
     csrr s1, sstatus
     csrr s2, sepc

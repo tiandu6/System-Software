@@ -518,7 +518,7 @@ RISC-V 的 16 位压缩指令低两位不为 `11`；在本实验要求处理的 
 
 #### Spec 与 Prompt 的设计思路
 
-我们以[网页练习要求](http://oslab.mobisys.top/lab2026/_book/lab3/lab3_2_1_exercise.html)为依据，按四段式组织提示词。[PROMPT] 明确目标文件、两个函数、学号标记和修改范围；[RELY] 列出真实的 Trap frame、时钟和 SBI 接口、原因常量及指令长度约束；[GUARANTEE] 固定公开接口和交付行为；[SPECIFICATION] 则把状态变化拆成可以验证的条件。
+我们以[实验要求](http://oslab.mobisys.top/lab2026/_book/lab3/lab3_2_1_exercise.html)为依据，按四段式组织提示词。[PROMPT] 明确目标文件、两个函数、学号标记和修改范围；[RELY] 列出真实的 Trap frame、时钟和 SBI 接口、原因常量及指令长度约束；[GUARANTEE] 固定公开接口和交付行为；[SPECIFICATION] 则把状态变化拆成可以验证的条件。
 
 | 规格部分 | interrupt_handler | exception_handler |
 |----------|-------------------|-------------------|

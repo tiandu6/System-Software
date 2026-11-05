@@ -34,6 +34,7 @@ static uint64_t timebase = 100000;
 void clock_init(void) {
     // enable timer interrupt in sie
     set_csr(sie, MIP_STIP);
+    // sie是超级模式下的中断使能寄存器，MIP_STIP是一个位掩码，用于启用超级模式下的定时器中断。
     // divided by 500 when using Spike(2MHz)
     // divided by 100 when using QEMU(10MHz)
     // timebase = sbi_timebase() / 500;
