@@ -5,7 +5,6 @@
 #include <stdio.h>
 
 //lab2 请补充你在lab2中的代码
-//lab2 function2-2 2511107
 static free_area_t free_area;
 
 #define free_list (free_area.free_list)
