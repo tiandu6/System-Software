@@ -90,7 +90,8 @@ CFLAGS	+= $(addprefix -I,$(INCLUDE))
 
 LIBDIR	+= libs
 
-$(call add_files_cc,$(call listf_cc,$(LIBDIR)),libs,)
+# Lab4 uses inline SBI calls and the kernel's readline implementation.
+$(call add_files_cc,$(filter-out libs/sbi.c libs/readline.c,$(call listf_cc,$(LIBDIR))),libs,)
 
 # -------------------------------------------------------------------
 # kernel

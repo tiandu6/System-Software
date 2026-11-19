@@ -11,5 +11,36 @@ wakeup_proc(struct proc_struct *proc) {
 }
 
 //LAB4 function3 YOUR CODE
+void schedule(void)
+{
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    current->need_resched = 0;
+
+    // idleproc is outside proc_list. Start after current and wrap at the head.
+    list_entry_t *start = current == idleproc ? &proc_list : &current->list_link;
+    list_entry_t *entry = start;
+    struct proc_struct *next = idleproc;
+    do
+    {
+        entry = list_next(entry);
+        if (entry != &proc_list)
+        {
+            struct proc_struct *proc = le2proc(entry, list_link);
+            if (proc->state == PROC_RUNNABLE)
+            {
+                next = proc;
+                break;
+            }
+        }
+    } while (entry != start);
+
+    next->runs++;
+    if (next != current)
+    {
+        proc_run(next);
+    }
+    local_intr_restore(intr_flag);
+}
 
 
