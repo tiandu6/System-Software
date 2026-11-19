@@ -369,20 +369,36 @@ void proc_init(void);
 
 以下是经过迭代优化后，最终成功实现该功能的提示词。
 
-````text
-[PROMPT]
+````markdown
+## [PROMPT]
+
 修改真实文件，补全Lab4模块三。保留标记，YOUR CODE改为2511107。
-[RELY]
-proc_list、current、idleproc、context、sync.h。
-[GUARANTEE]
-proc.c
-void cpu_idle(void),proc_run(struct proc_struct*);
-sched.c
+
+## [RELY]
+
+- `proc_list`、`current`、`idleproc`、`context`、`sync.h`。
+
+## [GUARANTEE]
+
+```c
+/* proc.c */
+void cpu_idle(void);
+void proc_run(struct proc_struct *proc);
+
+/* sched.c */
 void schedule(void);
-switch.S
-void switch_to(struct context*,struct context*);
-[SPECIFICATION]
-PCB与页表就绪。空闲循环见need_resched则调度。关中断清标记，轮转选就绪线程，无则回idle，更新runs。异进程更新current、写Sv39 satp并刷TLB。按context保存恢复ra/sp/s0–s11，返回后恢复中断。
+
+/* switch.S */
+void switch_to(struct context *from, struct context *to);
+```
+
+## [SPECIFICATION]
+
+- **PCB与页表就绪**：前置条件为 PCB 与页表初始化完成。
+- **`cpu_idle`**：空闲循环见 `need_resched` 则调用 `schedule()` 调度。
+- **`schedule`**：关中断清标记，轮转选就绪线程，无则回 `idle`，更新 `runs`。
+- **`proc_run`**：异进程更新 `current`、写 Sv39 `satp` 并刷 TLB。
+- **`switch_to`**：按 `context` 保存恢复 `ra`/`sp`/`s0–s11`，返回后恢复中断。
 ````
 
 #### 实现迭代过程
