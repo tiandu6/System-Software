@@ -221,13 +221,13 @@ init_main(void *arg)
 //LAB4 function2 2513411
 static struct proc_struct *alloc_proc(void)
 {
-    struct proc_struct *proc = kmalloc(sizeof(*proc));//在内核中申请 size 字节的内存，返回这块内存的地址，失败返回 NULL
+    struct proc_struct *proc = kmalloc(sizeof(*proc));
     if (proc != NULL)
     {
-        memset(proc, 0, sizeof(*proc));//把从 ptr 开始的 size 个字节，都填成指定的值
+        memset(proc, 0, sizeof(*proc));
         proc->state = PROC_UNINIT;
         proc->pid = -1;
-        proc->pgdir = boot_pgdir_pa;//记录这个进程要使用哪张根页表。=启动时建立的内核根页表的物理地址
+        proc->pgdir = boot_pgdir_pa;
         list_init(&proc->list_link);
         list_init(&proc->hash_link);
     }
@@ -237,15 +237,16 @@ static struct proc_struct *alloc_proc(void)
 static int copy_mm(uint32_t clone_flags, struct proc_struct *proc)
 {
     // Lab4 只创建共享内核地址空间的线程。
+    assert(current->mm == NULL);
     return 0;
 }
 
 static void copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf)
 {
-    proc->tf = (struct trapframe *)(proc->kstack + KSTACKSIZE) - 1;
-    *proc->tf = *tf;
+    proc->tf = (struct trapframe *)(proc->kstack + KSTACKSIZE - sizeof(struct trapframe));
+    *(proc->tf) = *tf;
     proc->tf->gpr.a0 = 0;
-    proc->tf->gpr.sp = esp != 0 ? esp : (uintptr_t)proc->tf;
+    proc->tf->gpr.sp = (esp != 0) ? esp : (uintptr_t)proc->tf;
     proc->context.ra = (uintptr_t)forkret;
     proc->context.sp = (uintptr_t)proc->tf;
 }
@@ -264,8 +265,7 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     }
     proc->parent = current;
 
-    int ret = setup_kstack(proc);//为新进程申请自己的内核栈 
-                                //申请失败，就跳到 free_proc，释放刚申请的 PCB
+    int ret = setup_kstack(proc);
     if (ret != 0)
     {
         goto free_proc;
@@ -279,11 +279,13 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
 
     bool intr_flag;
     local_intr_save(intr_flag);
-    proc->pid = get_pid();
-    hash_proc(proc);
-    list_add_before(&proc_list, &proc->list_link);
-    nr_process++;
-    wakeup_proc(proc);
+    {
+        proc->pid = get_pid();
+        hash_proc(proc);
+        list_add_before(&proc_list, &proc->list_link);
+        nr_process++;
+        wakeup_proc(proc);
+    }
     local_intr_restore(intr_flag);
     return proc->pid;
 
@@ -292,15 +294,6 @@ free_stack:
 free_proc:
     kfree(proc);
     return ret;
-
-//     | 调用顺序 | 作用 |
-// |---|---|
-// | `alloc_proc()` | 给新线程申请 PCB，并由 `do_fork()` 把当前的 `idleproc` 记为它的父进程。 |
-// | `setup_kstack()` | 通过 `alloc_pages()` 给新线程申请自己的内核栈。 |
-// | `copy_mm()` | 本实验的内核线程共享内核地址空间，这里直接返回成功。 |
-// | `copy_thread()` | 把临时 `trapframe` 复制到新栈上，设置 `context.ra` 和 `context.sp`，让线程第一次被切到时能从 `forkret` 开始。 |
-// | `get_pid()` → `hash_proc()` → `list_add_before()` | 给新线程分配 PID `1`，把同一份 PCB 加入哈希表和进程链表，然后把进程总数加到 `2`。这段登记过程有本地中断保护。 |
-// | `wakeup_proc()` | 把新线程设为 `PROC_RUNNABLE`，然后 `do_fork()` 恢复原中断状态并返回新线程的 PID。 |
 }
 
 int kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags)
@@ -311,7 +304,7 @@ int kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags)
     tf.gpr.s1 = (uintptr_t)arg;
     tf.epc = (uintptr_t)kernel_thread_entry;
     tf.status = (read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE;
-    return do_fork(clone_flags, 0, &tf);
+    return do_fork(clone_flags | CLONE_VM, 0, &tf);
 }
 
 void proc_init(void)
@@ -333,18 +326,19 @@ void proc_init(void)
     idleproc->pid = 0;
     idleproc->state = PROC_RUNNABLE;
     idleproc->kstack = (uintptr_t)bootstack;
-    idleproc->need_resched = 1;//给 idle 进程标记“需要调度”
+    idleproc->need_resched = 1;
     set_proc_name(idleproc, idle_name);
     current = idleproc;
     nr_process = 1;
 
     int pid = kernel_thread(init_main, "Hello world!!", 0);
-    if (pid < 0)
+    if (pid <= 0)
     {
         panic("cannot create initproc");
     }
     initproc = find_proc(pid);
-    assert(initproc != NULL);
+    assert(idleproc != NULL && idleproc->pid == 0);
+    assert(initproc != NULL && initproc->pid == 1);
     set_proc_name(initproc, init_name);
 }
 

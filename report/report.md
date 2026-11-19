@@ -179,6 +179,177 @@ void page_remove(pde_t *pgdir, uintptr_t la);
 完整内核在 QEMU 中输出了 `check_pgdir() succeeded!` 和 `check_boot_pgdir() succeeded!`。课程评分中的 **PMM 项通过，获得 10/10**；包含进程创建和调度在内的 Lab4 总分为 **30/30**。
 
 ---
+
+### 功能模块二：进程创建及初始化
+
+**负责人：2513411-邱宇湛**
+
+#### 模块功能描述
+
+**需要实现/修改的 C 语言接口：**
+
+```c
+static struct proc_struct *alloc_proc(void);(kern/process/proc.c)
+void proc_init(void);(kern/process/proc.c)
+int kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags);(kern/process/proc.c)
+int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf);(kern/process/proc.c)
+static void copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf);(kern/process/proc.c)
+static int copy_mm(uint32_t clone_flags, struct proc_struct *proc);(kern/process/proc.c)
+```
+
+**与之衔接的已有接口与结构：**
+
+```c
+struct proc_struct、struct context、struct trapframe
+proc_list、hash_list、idleproc、initproc、current、nr_process
+kmalloc()、kfree()、memset()、setup_kstack()、put_kstack()、get_pid()、hash_proc()、find_proc()、set_proc_name()、wakeup_proc()
+list_init()、list_add_before()、local_intr_save()、local_intr_restore()
+boot_pgdir_pa、bootstack、read_csr(sstatus)、SSTATUS_SPP、SSTATUS_SPIE、SSTATUS_SIE
+kernel_thread_entry、forkret、forkrets
+```
+
+**功能说明：**
+
+该模块在 `vmm_init()` 之后由 `proc_init()` 入口接管执行，负责把当前单执行流的内核启动上下文登记为第 0 个内核线程 `idleproc`，并建立完整的线程创建通路（`kernel_thread()` -> `do_fork()` -> `alloc_proc()` / `setup_kstack()` / `copy_mm()` / `copy_thread()`），创建出可被调度器选中运行的第 1 个内核线程 `initproc`。
+
+#### 关键状态和实现步骤
+
+##### 关键状态
+
+| 状态 | 在代码中的含义 | 维护要求 |
+|---|---|---|
+| 进程状态 `state` | 标记 PCB 当前处于 `PROC_UNINIT` 还是 `PROC_RUNNABLE` | `alloc_proc()` 置为 `PROC_UNINIT`，资源和上下文全部装配完成并入链后由 `wakeup_proc()` 转为 `PROC_RUNNABLE` |
+| 内核栈与 `tf` | `kstack` 为 2 页（8192 字节）内核栈低地址，`tf` 位于栈顶 | 新线程必须使用独立的内核栈；`copy_thread()` 在 `kstack + KSTACKSIZE` 顶部保留一份 `trapframe`，并保证 `tf->gpr.sp` 有效 |
+| 切换上下文 `context` | 保存进程切换所需的 `ra`、`sp` 与 `s0`~`s11` | 新线程的 `context.ra` 指向 `forkret`，`context.sp` 指向 `proc->tf`，用于首次调度后进入 Trap 返回流程 |
+| 全局进程管理结构 | `proc_list`、`hash_list`、`nr_process`、`current` | 除 `idleproc` 外，新建线程在关中断保护下分配 PID 并同时挂入 `proc_list` 与 `hash_list` |
+
+##### 核心函数的实现逻辑
+
+1. `alloc_proc()`：通过 `kmalloc(sizeof(*proc))` 申请进程控制块。`kmalloc` 不会自动清零内存，因此申请成功后先调用 `memset(proc, 0, sizeof(*proc))` 将全部字段置零，再显式初始化非零初值：`state = PROC_UNINIT`、`pid = -1`、`pgdir = boot_pgdir_pa`，并调用 `list_init()` 初始化 `list_link` 与 `hash_link`。
+2. `proc_init()`：先初始化 `proc_list` 和全部 `HASH_LIST_SIZE` 个哈希桶。由于开机后系统已经运行在 `bootstack` 上，第 0 个内核线程 `idleproc` 不单独申请内核栈，也不进入 `proc_list`，在 `alloc_proc()` 之后直接设置 `pid = 0`、`state = PROC_RUNNABLE`、`kstack = (uintptr_t)bootstack`、`need_resched = 1`、名称 `"idle"`，并将 `current` 指向 `idleproc`、`nr_process` 设为 `1`。接着调用 `kernel_thread(init_main, "Hello world!!", 0)` 创建 `initproc`，校验返回值 `pid > 0`，通过 `find_proc(pid)` 取回 PCB 并断言 `idleproc->pid == 0` 与 `initproc->pid == 1`，最后设置名称为 `"init"`。
+3. `kernel_thread()`：普通进程创建通常复制父进程的中断帧，内核线程没有用户态中断现场，于是在栈上构造临时 `struct trapframe tf` 作为模板。清零后将 `fn` 和 `arg` 分别放入 `tf.gpr.s0` 和 `tf.gpr.s1`，将 `tf.epc` 设为 `kernel_thread_entry`；`tf.status` 读取当前 `sstatus` 后置位 `SSTATUS_SPP` 和 `SSTATUS_SPIE` 并清除 `SSTATUS_SIE`，让 `sret` 返回到 S 模式并开启中断，同时避免 `RESTORE_ALL` 恢复过程中提前触发中断。最后传入 `clone_flags | CLONE_VM` 和栈参数 `0` 调用 `do_fork()`。
+4. `copy_thread()`：在子线程内核栈顶部划出 `sizeof(struct trapframe)` 空间给 `proc->tf` 并拷贝 `*tf`，按 `fork` 返回约定将 `proc->tf->gpr.a0` 清零。由于内核线程调用 `do_fork()` 时传入的 `esp` 为 `0`，这里令 `proc->tf->gpr.sp = (esp != 0) ? esp : (uintptr_t)proc->tf`，再令 `proc->context.ra = (uintptr_t)forkret`、`proc->context.sp = (uintptr_t)proc->tf`。首次切入该线程时，执行流按 `switch_to -> forkret -> forkrets(current->tf) -> __trapret(RESTORE_ALL + sret) -> kernel_thread_entry` 跳转，最终以 `s1` 为参数调用 `s0` 指向的 `init_main()`。
+5. `copy_mm()`：本实验创建的都是共享内核页表的内核线程，断言 `current->mm == NULL` 后直接返回 `0`，保持与后续实验用户地址空间复制接口的一致性。
+6. `do_fork()`：先检查 `nr_process >= MAX_PROCESS`（超限返回 `-E_NO_FREE_PROC`），随后按 `alloc_proc()`、设置 `proc->parent = current`、`setup_kstack(proc)`、`copy_mm()`、`copy_thread()` 的顺序装配资源。若 `setup_kstack()` 失败则释放 PCB 后返回错误码；若 `copy_mm()` 失败则按逆序先 `put_kstack(proc)` 再 `kfree(proc)`。装配完成后在 `local_intr_save()` 与 `local_intr_restore()` 保护下调用 `get_pid()` 分配 PID、挂入 `hash_list` 与 `proc_list` 尾部、递增 `nr_process` 并调用 `wakeup_proc(proc)` 置为就绪态，最后返回 `proc->pid`。
+
+#### Spec 与 Prompt 的设计思路
+
+模块二包含 6 个互相调用的函数，并直接依赖 `trapentry.S` 与 `kern/process/entry.S` 的寄存器约定。编写提示词时先核对 `proc.h`、`proc.c`、`trap.h` 与 `riscv.h` 的真实定义，在 `[RELY]` 中列出结构体字段、宏常量和 `set_proc_name()` 按固定长度 `PROC_NAME_LEN` 拷贝的行为边界；在 `[GUARANTEE]` 中固定 6 个函数的精确签名；在 `[SPECIFICATION]` 中按函数粒度明确前置条件、正常返回状态与失败清理条件，方便逐项对照验证。
+
+| 函数 | 规格核心约束 |
+|---|---|
+| `alloc_proc` | 全字段清零后再设 `PROC_UNINIT`、`pid = -1`、`pgdir = boot_pgdir_pa` 与空链表头 |
+| `copy_mm` | 断言 `current->mm == NULL` 后返回 `0`，不修改 `mm` 与 `pgdir` |
+| `copy_thread` | 栈顶放置 `proc->tf`、`a0 = 0`、`esp == 0` 时修正 `tf->gpr.sp`、`context.ra = forkret` |
+| `kernel_thread` | `s0/s1` 传入口和参数、`epc = kernel_thread_entry`、`status` 设 `SPP \| SPIE` 且清 `SIE` |
+| `do_fork` | 关中断登记 PID 与链表并唤醒；`setup_kstack`/`copy_mm` 失败按逆序回收已申请资源 |
+| `proc_init` | `idleproc`（PID 0）复用 `bootstack` 且不入 `proc_list`，再创建并检查 `initproc`（PID 1） |
+
+#### 最终提示词
+
+以下是经过迭代优化后，最终成功实现该功能的提示词（与 `report/prompt.md` 模块二一致）：
+
+````markdown
+## [PROMPT]
+
+**任务**：在 `code/kern/process/proc.c` 的 `//LAB4 function2 YOUR CODE` 标记处实现 `alloc_proc`、`copy_mm`、`copy_thread`、`do_fork`、`kernel_thread` 和 `proc_init`，完成进程管理链表与哈希表初始化、第 0 个内核线程 `idleproc` 的封装，以及第 1 个可运行内核线程 `initproc` 的创建。
+
+**操作要求**：直接修改项目中的实际文件。保留 `//LAB4 function2` 注释标记并将 `YOUR CODE` 替换为 `2513411`。函数签名须与 `code/kern/process/proc.h` 及静态辅助函数约定一致，不新增无关公开接口。不得改动 `init_main`、模块三区域、`Makefile` 或教师评测代码，不提交或推送 Git。
+
+**输出要求**：依据以下上下文和行为规格完成代码编写，以工程中的真实定义为准。完成后简要说明字段初始化、`trapframe` 首次运行现场构造以及资源分配失败回滚的处理依据，并如实记录编译、`make qemu` 与 `make grade` 的验证结果。
+
+## [RELY]
+
+1. 先读取工程中的实际定义：
+   - `code/kern/process/proc.h` 与 `code/kern/process/proc.c`：`struct proc_struct`、`struct context`、全局进程管理变量及已有辅助函数；
+   - `code/kern/process/entry.S` 与 `code/kern/trap/trapentry.S`：`kernel_thread_entry`、`forkrets` 与 `__trapret`；
+   - `code/kern/trap/trap.h`：`struct pushregs` 和 `struct trapframe`；
+   - `code/kern/mm/pmm.h`、`code/kern/mm/memlayout.h`、`code/kern/mm/kmalloc.h`：`CLONE_VM`、`KSTACKSIZE`、`boot_pgdir_pa`、`bootstack`、`kmalloc`/`kfree`；
+   - `code/kern/schedule/sched.h`、`code/kern/sync/sync.h`、`code/libs/riscv.h`、`code/libs/error.h`、`code/libs/list.h`。
+
+2. 已有数据结构与全局状态（位于 `proc.h` 和 `proc.c`）：
+   - `struct proc_struct` 包含字段：`state`、`pid`、`runs`、`kstack`、`need_resched`、`parent`、`mm`、`context`、`tf`、`pgdir`、`flags`、`name[PROC_NAME_LEN + 1]`、`list_link`、`hash_link`。
+   - `enum proc_state`：`PROC_UNINIT`、`PROC_SLEEPING`、`PROC_RUNNABLE`、`PROC_ZOMBIE`。
+   - `struct context` 包含 `ra`、`sp`、`s0`~`s11`。
+   - 全局变量：`proc_list`、`hash_list[HASH_LIST_SIZE]`、`idleproc`、`initproc`、`current`、`nr_process`、`boot_pgdir_pa`、`bootstack`。
+   - 常量：`PROC_NAME_LEN` 为 `15`，`MAX_PROCESS` 为 `4096`，`KSTACKSIZE` 为 `2 * PGSIZE`（8192 字节），`CLONE_VM` 为 `0x00000100`，错误码为 `-E_NO_MEM` 和 `-E_NO_FREE_PROC`。
+
+3. 已有接口与汇编衔接约定：
+   - `setup_kstack(proc)` 分配 2 页内核栈并写入 `proc->kstack`，失败返回 `-E_NO_MEM`；`put_kstack(proc)` 释放内核栈。
+   - `get_pid()` 遍历 `proc_list` 分配大于 `0` 且唯一的 PID；`hash_proc(proc)` 将 `proc` 插入 `hash_list`；`find_proc(pid)` 按 PID 查找进程；`wakeup_proc(proc)` 将状态置为 `PROC_RUNNABLE`。
+   - `set_proc_name(proc, name)` 内部按固定长度 `PROC_NAME_LEN` 调用 `memcpy(proc->name, name, PROC_NAME_LEN)`，调用方传入的字符串缓冲区长度应达到 `PROC_NAME_LEN` 字节以上，避免对短字符串字面量越界读取。
+   - `forkret()` 调用 `forkrets(current->tf)`，进而执行 `__trapret`（`RESTORE_ALL` + `sret`）；`kernel_thread_entry` 从 `s1` 取出参数放入 `a0`，调用 `s0` 指向的函数，返回后调用 `do_exit`。
+   - `local_intr_save(intr_flag)` 和 `local_intr_restore(intr_flag)` 用于保护临界区。
+
+## [GUARANTEE]
+
+交付以下六个接口，保留精确的函数名、参数和返回类型：
+
+```c
+static struct proc_struct *alloc_proc(void);
+static int copy_mm(uint32_t clone_flags, struct proc_struct *proc);
+static void copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf);
+int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf);
+int kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags);
+void proc_init(void);
+```
+
+## [SPECIFICATION]
+
+### `alloc_proc`
+
+- **Pre-Condition**：`kmalloc` 已可用，系统已建立初始内核页表 `boot_pgdir_pa`。
+- **Post-Condition**：若分配成功，返回完成初始化的 `struct proc_struct *`：`state` 为 `PROC_UNINIT`，`pid` 为 `-1`，`pgdir` 为 `boot_pgdir_pa`，`runs`、`kstack`、`need_resched`、`flags` 为 `0`，`parent`、`mm`、`tf` 为 `NULL`，`context` 和 `name` 清零，`list_link` 和 `hash_link` 完成链表节点初始化。内存不足时返回 `NULL`。
+- **Requirements**：必须显式清零再设置非零初值，防止 `kmalloc` 返回未清零内存导致字段出现脏数据。
+
+### `copy_mm`
+
+- **Pre-Condition**：`proc` 为正在创建的子内核线程 PCB，当前进程为内核线程（`current->mm == NULL`）。
+- **Post-Condition**：断言 `current->mm == NULL` 成立后返回 `0`，不分配新的用户态地址空间结构。
+- **Requirements**：在当前实验阶段保留函数形态，不修改 `proc->mm` 与 `proc->pgdir`。
+
+### `copy_thread`
+
+- **Pre-Condition**：`proc->kstack` 已指向分配好的 `KSTACKSIZE` 字节内核栈，`tf` 指向有效的初始中断帧模板。
+- **Post-Condition**：在内核栈顶留出 `sizeof(struct trapframe)` 空间保存 `proc->tf`，将 `*tf` 复制到 `proc->tf`，设置 `proc->tf->gpr.a0 = 0`；当 `esp == 0` 时将 `proc->tf->gpr.sp` 设为 `(uintptr_t)proc->tf`，否则设为 `esp`；将 `proc->context.ra` 设为 `(uintptr_t)forkret`，`proc->context.sp` 设为 `(uintptr_t)proc->tf`。
+- **Requirements**：内核线程传入 `esp == 0` 时不得让 `tf->gpr.sp` 保持为 `0`，否则从 `__trapret` 恢复后将因栈指针无效触发访存异常。
+
+### `kernel_thread`
+
+- **Pre-Condition**：`fn` 为有效的内核线程入口函数指针，`arg` 为传递给 `fn` 的参数，`clone_flags` 为线程创建标志。
+- **Post-Condition**：在栈上构造清零后的临时 `trapframe`，令 `tf.gpr.s0 = (uintptr_t)fn`、`tf.gpr.s1 = (uintptr_t)arg`、`tf.epc = (uintptr_t)kernel_thread_entry`，令 `tf.status = (read_csr(sstatus) | SSTATUS_SPP | SSTATUS_SPIE) & ~SSTATUS_SIE`，并调用 `do_fork(clone_flags | CLONE_VM, 0, &tf)` 返回结果。
+- **Requirements**：`tf.status` 必须保证 `sret` 返回到 S 模式并在跳转时开启中断，同时在 `RESTORE_ALL` 恢复现场过程中保持 `SIE` 为 `0`。
+
+### `do_fork`
+
+- **Pre-Condition**：`current` 有效，`tf` 指向待复制的现场，内核栈与 PCB 分配器可用。
+- **Post-Condition**：
+  - **Case 1 · 正常路径**：成功分配 PCB 与内核栈、完成 `copy_mm` 与 `copy_thread` 后，在关中断临界区内分配 PID、将进程加入 `hash_list` 与 `proc_list`、递增 `nr_process` 并调用 `wakeup_proc(proc)` 置为 `PROC_RUNNABLE`，恢复中断后返回新进程 PID。
+  - **Case 2 · 进程数达到上限**：`nr_process >= MAX_PROCESS` 时直接返回 `-E_NO_FREE_PROC`。
+  - **Case 3 · 分配失败**：`alloc_proc()` 失败返回 `-E_NO_MEM`；`setup_kstack()` 失败释放已分配的 PCB 后返回错误码；`copy_mm()` 失败先调用 `put_kstack()` 释放内核栈，再调用 `kfree()` 释放 PCB 并返回错误码。
+- **Requirements**：不得在失败路径遗漏已申请的资源；全局进程链表、哈希表和 `nr_process` 的更新必须在关中断保护下完成。
+
+### `proc_init`
+
+- **Pre-Condition**：物理内存、虚拟内存框架及 `bootstack`、`boot_pgdir_pa` 已就绪。
+- **Post-Condition**：初始化 `proc_list` 和全部 `hash_list` 桶；分配并设置 `idleproc`（`pid = 0`、`state = PROC_RUNNABLE`、`kstack = (uintptr_t)bootstack`、`need_resched = 1`、`name = "idle"`），将 `current` 指向 `idleproc`、`nr_process` 设为 `1`；调用 `kernel_thread(init_main, "Hello world!!", 0)` 创建 `initproc`，检查返回的 `pid > 0` 并通过 `find_proc(pid)` 获取后断言 `idleproc->pid == 0` 且 `initproc->pid == 1`，设置其名称为 `"init"`。
+- **Requirements**：若 `idleproc` 分配或 `initproc` 创建失败，必须调用 `panic()` 终止；`idleproc` 不加入 `proc_list`；函数尾部不得提前 `return`，以便评测注入代码接在函数末尾执行。
+````
+
+#### 实现迭代过程
+
+1. **第一次迭代：首次运行现场与栈指针核对**
+   最初对照 `trapentry.S` 和 `kern/process/entry.S` 检查 `kernel_thread()` 与 `copy_thread()` 的衔接时，发现两个容易遗漏的细节。第一，内核线程调用 `do_fork()` 时传入的 `stack` 为 `0`，`copy_thread()` 必须把 `proc->tf->gpr.sp` 显式设为 `(uintptr_t)proc->tf`，否则 `__trapret` 中的 `RESTORE_ALL` 在最后恢复 `x2` 时会把 `sp` 清零，导致刚进入 `init_main()` 压栈就触发异常。第二，`kernel_thread()` 设置 `tf.status` 时，要在置位 `SSTATUS_SPP` 和 `SSTATUS_SPIE` 的同时清掉 `SSTATUS_SIE`，让中断在 `sret` 执行完毕后才打开。此外，`kernel_thread()` 原来传入 `do_fork(clone_flags, 0, &tf)`，修改为 `clone_flags | CLONE_VM` 以标明共享地址空间；`proc_init()` 中对 `kernel_thread()` 返回值的判断从 `pid < 0` 收紧为 `pid <= 0`（PID `0` 保留给 `idleproc`），并补上了 `idleproc->pid == 0` 与 `initproc->pid == 1` 的检查。
+2. **第二次迭代：`set_proc_name()` 拷贝边界与 `do_fork()` 临界区核对**
+   检查 `proc.c` 中已有的 `set_proc_name()` 时注意到，该函数直接使用 `memcpy(proc->name, name, PROC_NAME_LEN)` 固定拷贝 15 字节。如果直接传入 `"idle"` 或 `"init"` 这样的短字面量，`memcpy` 会向后多读十几个字节。因此在 `proc_init()` 中使用长度为 `PROC_NAME_LEN + 1` 的静态零填充字符数组来传递名称。同时在 `copy_mm()` 补上 `assert(current->mm == NULL)` 检查当前线程确实没有用户地址空间，并检查 `do_fork()` 中的 `get_pid()`、`hash_proc()`、链表插入、`nr_process++` 和 `wakeup_proc()` 均位于同一段关中断临界区内，确认失败跳转路径按先 `put_kstack()` 后 `kfree()` 的顺序清理。
+3. **第三次迭代：全工程联调与本地验证环境兼容**
+   在 WSL2 Ubuntu（`riscv64-unknown-elf-gcc 14.2.0`、`QEMU 4.1.1`）下与模块一、模块三代码一起做整机联调时遇到三处工具链和环境差异：一是 GCC 14.2.0 默认将 `-Wint-conversion` 和 `-Wincompatible-pointer-types` 作为报错处理，触发在框架原有的 `kern/mm/kmalloc.c:92` 与评测文件 `tools/test_lab4.c:90-91` 上；二是 Windows 检出使 `tools/grade.sh` 带有 CRLF 行尾；三是本机安装了 `gdb-multiarch` 但未安装 `riscv64-unknown-elf-gdb`。为了只保留对个人负责文件和报告的修改、不改动仓库 `Makefile` 或教师脚本，验证时仅在外部临时副本和环境变量中传入 `-Wno-error=int-conversion -Wno-error=incompatible-pointer-types`、转换临时 `grade.sh` 行尾并用 `gdb-multiarch bin/kernel` 包装脚本完成实测。
+
+#### 最终结果
+
+完成上述修改后，全工程编译通过且 `proc.c` 无警告。`make qemu` 启动后通过了 `check_alloc_page`、`check_pgdir`、`check_boot_pgdir`、`kmalloc_init` 和 `check_vmm`，`initproc` 成功打印 `this initproc, pid = 1, name = "init"`、`To U: "Hello world!!".` 和 `To U: "en.., Bye, Bye. :)"` 并经 `do_exit()` 退出。`make grade` 中 `check Process Create` 项通过（`10/10`），全部三项总分 `30/30`。当前模块覆盖内核线程的创建、登记和首次运行现场构造，用户态内存复制和进程回收将在后续实验中实现。
+
+---
 ### 功能模块三：进程调度
 
 **负责人：** 2511107-林永盛
@@ -198,20 +369,36 @@ void page_remove(pde_t *pgdir, uintptr_t la);
 
 以下是经过迭代优化后，最终成功实现该功能的提示词。
 
-````text
-[PROMPT]
+````markdown
+## [PROMPT]
+
 修改真实文件，补全Lab4模块三。保留标记，YOUR CODE改为2511107。
-[RELY]
-proc_list、current、idleproc、context、sync.h。
-[GUARANTEE]
-proc.c
-void cpu_idle(void),proc_run(struct proc_struct*);
-sched.c
+
+## [RELY]
+
+- `proc_list`、`current`、`idleproc`、`context`、`sync.h`。
+
+## [GUARANTEE]
+
+```c
+/* proc.c */
+void cpu_idle(void);
+void proc_run(struct proc_struct *proc);
+
+/* sched.c */
 void schedule(void);
-switch.S
-void switch_to(struct context*,struct context*);
-[SPECIFICATION]
-PCB与页表就绪。空闲循环见need_resched则调度。关中断清标记，轮转选就绪线程，无则回idle，更新runs。异进程更新current、写Sv39 satp并刷TLB。按context保存恢复ra/sp/s0–s11，返回后恢复中断。
+
+/* switch.S */
+void switch_to(struct context *from, struct context *to);
+```
+
+## [SPECIFICATION]
+
+- **PCB与页表就绪**：前置条件为 PCB 与页表初始化完成。
+- **`cpu_idle`**：空闲循环见 `need_resched` 则调用 `schedule()` 调度。
+- **`schedule`**：关中断清标记，轮转选就绪线程，无则回 `idle`，更新 `runs`。
+- **`proc_run`**：异进程更新 `current`、写 Sv39 `satp` 并刷 TLB。
+- **`switch_to`**：按 `context` 保存恢复 `ra`/`sp`/`s0–s11`，返回后恢复中断。
 ````
 
 #### 实现迭代过程
