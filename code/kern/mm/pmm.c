@@ -302,12 +302,54 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
 }
 
 //LAB4 function1 YOUR CODE
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
+{
+    pde_t *root_entry = &pgdir[PDX1(la)];
+    pde_t original_entry = *root_entry;
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL)
+    {
+        // The first table allocation may have succeeded before the second failed.
+        if (!(original_entry & PTE_V) && (*root_entry & PTE_V))
+        {
+            struct Page *table = pde2page(*root_entry);
+            *root_entry = original_entry;
+            flush_tlb();
+            set_page_ref(table, 0);
+            free_page(table);
+        }
+        return -E_NO_MEM;
+    }
 
+    struct Page *old = (*ptep & PTE_V) ? pte2page(*ptep) : NULL;
+    if (old != page)
+    {
+        page_ref_inc(page);
+    }
+    *ptep = pte_create(page2ppn(page), perm);
+    tlb_invalidate(pgdir, la);
+    if (old != NULL && old != page && page_ref_dec(old) == 0)
+    {
+        free_page(old);
+    }
+    return 0;
+}
 
-
-
-
-
+void page_remove(pde_t *pgdir, uintptr_t la)
+{
+    pte_t *ptep;
+    struct Page *page = get_page(pgdir, la, &ptep);
+    if (page == NULL)
+    {
+        return;
+    }
+    *ptep = 0;
+    tlb_invalidate(pgdir, la);
+    if (page_ref_dec(page) == 0)
+    {
+        free_page(page);
+    }
+}
 
 // invalidate a TLB entry, but only if the page tables being
 // edited are the ones currently in use by the processor.
