@@ -372,33 +372,53 @@ void proc_init(void);
 ````markdown
 ## [PROMPT]
 
-修改真实文件，补全Lab4模块三。保留标记，YOUR CODE改为2511107。
+**任务**：完成 uCore Lab4 模块三，在以下文件中实现进程调度与上下文切换：
+
+- `code/kern/process/proc.c`：`cpu_idle()`、`proc_run()`。
+- `code/kern/schedule/sched.c`：`schedule()`。
+- `code/kern/process/switch.S`：`switch_to()`。
+
+**操作要求**：必须修改实际文件。只补全 `LAB4 function3` 对应代码，保留标记，将 `YOUR CODE` 替换为 `2511107`，保留已有接口和课程测试。
+
+**输出要求**：按以下规格实现，运行 `make grade` 并报告结果。
 
 ## [RELY]
 
-- `proc_list`、`current`、`idleproc`、`context`、`sync.h`。
+- `proc_list` 是普通进程的循环链表。`current` 指向当前进程，`idleproc` 单独保存。用 `list_next()` 遍历，通过 `le2proc()` 得到 PCB。
+- `local_intr_save()` 保存状态并关闭本地中断，`local_intr_restore()` 恢复原状态。`pgdir` 存放根页表物理地址，可用 `SATP_MODE_SV39`、`RISCV_PGSHIFT`、`write_csr()` 和 `flush_tlb()` 切换页表。
+- `struct context` 按顺序存放 `ra`、`sp`、`s0` 至 `s11`，字段均为 `uintptr_t`。RV64 下 `REGBYTES` 为 `8`，汇编提供 `LOAD` 和 `STORE`。
 
 ## [GUARANTEE]
 
 ```c
-/* proc.c */
-void cpu_idle(void);
-void proc_run(struct proc_struct *proc);
-
-/* sched.c */
+void cpu_idle(void) __attribute__((noreturn));
 void schedule(void);
-
-/* switch.S */
+void proc_run(struct proc_struct *proc);
 void switch_to(struct context *from, struct context *to);
 ```
 
 ## [SPECIFICATION]
 
-- **PCB与页表就绪**：前置条件为 PCB 与页表初始化完成。
-- **`cpu_idle`**：空闲循环见 `need_resched` 则调用 `schedule()` 调度。
-- **`schedule`**：关中断清标记，轮转选就绪线程，无则回 `idle`，更新 `runs`。
-- **`proc_run`**：异进程更新 `current`、写 Sv39 `satp` 并刷 TLB。
-- **`switch_to`**：按 `context` 保存恢复 `ra`/`sp`/`s0–s11`，返回后恢复中断。
+**`cpu_idle()`**
+
+- **Pre-Condition**：进程初始化完成，当前运行的是 `idleproc`。
+- **Post-Condition**：持续检查 `need_resched`，有请求就调用 `schedule()`，函数不返回。
+
+**`schedule()`**
+
+- **Pre-Condition**：进程链表、`current` 和 `idleproc` 已初始化。
+- **Post-Condition**：关中断并清除当前进程的调度请求。从当前进程的后继开始轮转，当前是 `idleproc` 时从链表首个普通节点开始。跳过链表头，取第一个 `PROC_RUNNABLE` 的进程，无则选 `idleproc`。
+- **Requirements**：选中者的 `runs` 加一，目标不同时才切换。本次调用结束前恢复原中断状态。
+
+**`proc_run()`**
+
+- **Pre-Condition**：目标进程的页表和上下文已准备好。
+- **Post-Condition**：目标就是 `current` 时直接返回。切换到其他进程时，关中断，更新 `current`，以 Sv39 模式和根页表物理页号设置 `satp`，刷新 TLB 后切换上下文。原线程再次运行时恢复自己保存的中断状态。
+
+**`switch_to()`**
+
+- **Pre-Condition**：`a0`、`a1` 分别指向旧线程和目标线程的 `context`。
+- **Post-Condition**：按结构体布局先保存旧线程的 `ra`、`sp`、`s0` 至 `s11`，再加载目标寄存器。执行 `ret` 后，新线程从 `forkret` 启动，运行过的线程从上次切出的调用点继续。
 ````
 
 #### 实现迭代过程
