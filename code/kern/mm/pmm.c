@@ -301,53 +301,7 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
     return NULL;
 }
 
-//LAB4 function1 2511107
-static void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep)
-{
-    if (*ptep & PTE_V)
-    {
-        struct Page *page = pte2page(*ptep);
-        *ptep = 0;
-        tlb_invalidate(pgdir, la);
-        if (page_ref_dec(page) == 0)
-        {
-            free_page(page);
-        }
-    }
-}
-
-void page_remove(pde_t *pgdir, uintptr_t la)
-{
-    pte_t *ptep = get_pte(pgdir, la, 0);
-    if (ptep != NULL)
-    {
-        page_remove_pte(pgdir, la, ptep);
-    }
-}
-
-int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
-{
-    pte_t *ptep = get_pte(pgdir, la, 1);
-    if (ptep == NULL)
-    {
-        return -E_NO_MEM;
-    }
-
-    if (!(*ptep & PTE_V) || pte2page(*ptep) != page)
-    {
-        page_ref_inc(page);
-        page_remove_pte(pgdir, la, ptep);
-    }
-
-    // Sv39 叶子项至少需要 R 或 X，写权限也要求 R。
-    if ((perm & PTE_W) || !(perm & (PTE_R | PTE_X)))
-    {
-        perm |= PTE_R;
-    }
-    *ptep = pte_create(page2ppn(page), perm);
-    tlb_invalidate(pgdir, la);
-    return 0;
-}
+//LAB4 function1 YOUR CODE
 
 
 
