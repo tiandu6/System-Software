@@ -39,22 +39,27 @@ struct context
 
 extern list_entry_t proc_list;
 
-struct proc_struct
+struct proc_struct 
 {
-    enum proc_state state;        // Process state
-    int pid;                      // Process ID
-    int runs;                     // the running times of Proces
-    uintptr_t kstack;             // Process kernel stack
-    volatile bool need_resched;   // bool value: need to be rescheduled to release CPU?
-    struct proc_struct *parent;   // the parent process
-    struct mm_struct *mm;         // Process's memory management field
-    struct context context;       // Switch here to run process
-    struct trapframe *tf;         // Trap frame for current interrupt
-    uintptr_t pgdir;              // the base addr of Page Directroy Table(PDT)
-    uint32_t flags;               // Process flag
-    char name[PROC_NAME_LEN + 1]; // Process name
-    list_entry_t list_link;       // Process link list
-    list_entry_t hash_link;       // Process hash list
+    enum proc_state state;       // 进程状态，例如可运行、睡眠或已退出待回收
+    int pid;                     // 进程的唯一编号
+    int runs;                    // 被调度器选中的次数
+
+    uintptr_t kstack;            // 该进程内核栈的起始地址（低地址端）
+    volatile bool need_resched;   // 为 true 时，表示当前进程需要重新调度
+    struct proc_struct *parent;  // 指向父进程的 PCB
+
+    struct mm_struct *mm;        // 指向虚拟地址空间的管理结构，记录 VMA 等信息
+    struct context context;      // 进程切换时保存和恢复的寄存器，如 ra、sp、s0–s11
+    struct trapframe *tf;        // 指向 Trap 现场，包含通用寄存器和 sepc 等
+                                 // 新线程第一次运行时，也用它装入预先准备的初始现场
+    uintptr_t pgdir;             // 根页表的物理基址，切换地址空间时用于设置 satp
+
+    uint32_t flags;              // 进程的额外标志，用不同的位记录属性或状态
+    char name[PROC_NAME_LEN + 1]; // 进程名，多出的一个字节存字符串结束符 '\0'
+
+    list_entry_t list_link;      // 用这个节点把 PCB 挂入全局进程链表
+    list_entry_t hash_link;      // 用这个节点把 PCB 挂入 PID 哈希表，便于按 PID 查找
 };
 
 #define le2proc(le, member) \

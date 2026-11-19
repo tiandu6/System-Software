@@ -88,6 +88,87 @@ size_t nr_free_pages(void)
 }
 
 //lab2 请补充你在lab2中的代码
+//lab2 function1 2513411
+static void page_init(void) {
+    extern char end[];
+
+    uint64_t memory_base = get_memory_base();
+    uint64_t memory_size = get_memory_size();
+    uint64_t memory_end;
+    uintptr_t managed_end;
+    uintptr_t kernel_end_pa;
+    uintptr_t pages_pa;
+    uintptr_t pages_end_pa;
+    uintptr_t free_begin;
+    size_t descriptor_count;
+    size_t free_count;
+
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+    const uintptr_t kernel_begin_pa = (uintptr_t)KERNBASE - va_pa_offset;
+    const uintptr_t mapped_memory_end = (uintptr_t)KERNTOP - va_pa_offset;
+    if (memory_base == 0 || memory_size == 0 ||
+        memory_base > (uint64_t)-1 - memory_size) {
+        panic("invalid physical memory range in device tree");
+    }
+    memory_end = memory_base + memory_size;
+
+    /* npage describes the range reported by the firmware, in page numbers. */
+    npage = PPN(memory_end);
+    if (npage <= nbase || memory_end <= DRAM_BASE ||
+        memory_base > kernel_begin_pa) {
+        panic("physical memory does not contain the kernel");
+    }
+
+    /* Use Lab3's existing virtual mapping bounds for the managed DRAM range. */
+    managed_end = (memory_end < mapped_memory_end) ? memory_end
+                                                 : mapped_memory_end;
+    managed_end = ROUNDDOWN(managed_end, PGSIZE);
+    kernel_end_pa = PADDR((uintptr_t)end);
+    if (managed_end <= DRAM_BASE || kernel_end_pa >= managed_end) {
+        panic("physical memory does not contain the kernel");
+    }
+
+    /* The descriptor array starts after the kernel and is page aligned. */
+    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+    pages_pa = PADDR((uintptr_t)pages);
+    descriptor_count = npage - nbase;
+    if (pages_pa < memory_base || pages_pa >= managed_end ||
+        descriptor_count > ((uintptr_t)-1 - pages_pa) / sizeof(struct Page)) {
+        panic("not enough physical memory for Page descriptors");
+    }
+    pages_end_pa = pages_pa + descriptor_count * sizeof(struct Page);
+    if (pages_end_pa > managed_end) {
+        panic("not enough physical memory for Page descriptors");
+    }
+
+    /* Start conservatively: firmware, the kernel, and descriptors are reserved. */
+    for (size_t i = 0; i < descriptor_count; i++) {
+        struct Page *page = &pages[i];
+        page->flags = 0;
+        page->property = 0;
+        set_page_ref(page, 0);
+        SetPageReserved(page);
+        list_init(&page->page_link);
+    }
+
+    /* Only complete pages after the descriptor array enter the allocator. */
+    free_begin = ROUNDUP(pages_end_pa, PGSIZE);
+    if (free_begin > managed_end) {
+        panic("no complete physical page remains after reservations");
+    }
+    free_count = (managed_end - free_begin) / PGSIZE;
+    if (free_count == 0) {
+        panic("no complete physical page remains after reservations");
+    }
+
+    cprintf("physical memory: [0x%016lx, 0x%016lx)\n",
+            memory_base, memory_end);
+    cprintf("managed memory ends at: 0x%016lx\n", managed_end);
+    cprintf("Page descriptors: [0x%016lx, 0x%016lx)\n",
+            pages_pa, pages_end_pa);
+    init_memmap(pa2page(free_begin), free_count);
+    cprintf("free physical pages: %lu\n", nr_free_pages());
+}
 
 static void enable_paging(void)
 {
@@ -220,7 +301,53 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
     return NULL;
 }
 
-//LAB4 function1 YOUR CODE
+//LAB4 function1 2511107
+static void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep)
+{
+    if (*ptep & PTE_V)
+    {
+        struct Page *page = pte2page(*ptep);
+        *ptep = 0;
+        tlb_invalidate(pgdir, la);
+        if (page_ref_dec(page) == 0)
+        {
+            free_page(page);
+        }
+    }
+}
+
+void page_remove(pde_t *pgdir, uintptr_t la)
+{
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep != NULL)
+    {
+        page_remove_pte(pgdir, la, ptep);
+    }
+}
+
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)
+{
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL)
+    {
+        return -E_NO_MEM;
+    }
+
+    if (!(*ptep & PTE_V) || pte2page(*ptep) != page)
+    {
+        page_ref_inc(page);
+        page_remove_pte(pgdir, la, ptep);
+    }
+
+    // Sv39 叶子项至少需要 R 或 X，写权限也要求 R。
+    if ((perm & PTE_W) || !(perm & (PTE_R | PTE_X)))
+    {
+        perm |= PTE_R;
+    }
+    *ptep = pte_create(page2ppn(page), perm);
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
 
 
 
